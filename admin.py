@@ -4,15 +4,19 @@ import os
 import sqlitecloud  # Use sqlitecloud instead of sqlite3
 import io
 import csv
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
+
+DATABASE_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
+DATABASE = os.getenv("DATABASE")
  
 # -------------------------
 # Connection Helper
 # -------------------------
 def get_connection():
-    return sqlitecloud.connect(
-        "sqlitecloud://cbwb6jhxhk.g1.sqlite.cloud:8860/user_info?apikey=tzKSY69TJgit4JxRZqGYxSSSXXn5EWfmoYezjolRdn8"
-    )
- 
+    return sqlitecloud.connect(DATABASE_CONNECTION_STRING)
  
 def admin_panel():
     st.title("🔐 Admin Panel")
@@ -51,7 +55,7 @@ def admin_panel():
     with col_right:
         st.link_button(
             "🌐 Open in SQLite Cloud",
-            "https://dashboard.sqlitecloud.io/organizations/aibej2uhk/projects/cbwb6jhxhk/studio?database=user_info"
+            DATABASE
         )
  
  
