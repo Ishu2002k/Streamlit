@@ -283,11 +283,26 @@ def admin_panel():
                 st.subheader(f"Contents of `{selected_table}`")
                 st.dataframe(df, use_container_width=True)
  
+        # Define the dialog once
+        @st.dialog("⚠️ Confirm Delete")
+        def confirm_delete_dialog(table_name):
+            st.warning(f"Are you sure you want to delete the table `{table_name}`? This action cannot be undone.")
+           
+            col1, col2 = st.columns(2)
+            if col1.button("✅ Yes — delete", key="confirm_delete"):
+                with get_connection() as conn:
+                    conn.execute(f'DROP TABLE IF EXISTS "{table_name}";')
+                    conn.commit()
+                st.success(f"Table `{table_name}` has been deleted!")
+                st.rerun()
+ 
+            if col2.button("❌ Cancel", key="cancel_delete"):
+                st.info("Delete action cancelled.")
+                st.rerun()
+ 
+ 
+        # Trigger dialog on button click
         with col2:
             if st.button("❌ Delete Table"):
-                with get_connection() as conn:
-                    conn.execute(f"DROP TABLE IF EXISTS {selected_table};")
-                    conn.commit()
-                st.warning(f"Table `{selected_table}` has been deleted!")
-                st.rerun()
+                confirm_delete_dialog(selected_table)
 
