@@ -8,3 +8,4 @@ numpy
 sqlalchemy
 dotenv
 sqlitecloud
+sendgrid

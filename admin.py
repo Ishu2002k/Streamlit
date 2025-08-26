@@ -5,13 +5,119 @@ import sqlitecloud  # Use sqlitecloud instead of sqlite3
 import io
 import csv
 from dotenv import load_dotenv
+import random
+import smtplib
+from email.mime.text import MIMEText 
+
 
 # Load .env file
 load_dotenv()
 
 DATABASE_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
 DATABASE = os.getenv("DATABASE")
- 
+USER_CONNECTION_STRING = os.getenv("USER_CONNECTION_STRING")
+
+# ------------------------
+# DB Helpers
+# ------------------------
+def init_db():
+    with sqlitecloud.connect(USER_CONNECTION_STRING) as conn:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY,
+                password TEXT
+            )
+        """)
+        conn.commit()
+
+def get_user(email):
+    with sqlitecloud.connect(os.getenv("USER_CONNECTION_STRING")) as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE email=?", (email,))
+        return c.fetchone()
+
+def update_password(email, new_password):
+    with sqlitecloud.connect(os.getenv("USER_CONNECTION_STRING")) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET password=? WHERE email=?", (new_password, email))
+        conn.commit()
+
+
+# ------------------------
+# Email Helper (Use Gmail/SMTP)
+# ------------------------
+
+def send_otp(email, otp):
+    sender = os.getenv("SMTP_EMAIL")       # Gmail address
+    password = os.getenv("SMTP_PASSWORD")  # Gmail App Password
+    print(sender)
+    print(password)
+
+    msg = MIMEText(f"Your OTP for password reset is: {otp}")
+    msg["Subject"] = "Password Reset OTP"
+    msg["From"] = sender
+    msg["To"] = email
+
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.starttls()
+        server.login(sender, password)
+        server.sendmail(sender, email, msg.as_string())
+
+
+# ------------------------
+# Forgot Password Flow
+# ------------------------
+def forgot_password():
+    st.subheader("🔑 Forgot Password")
+
+    if "reset_step" not in st.session_state:
+        st.session_state.reset_step = 1
+        st.session_state.otp = None
+        st.session_state.reset_email = None
+
+    # Step 1: Enter Email
+    if st.session_state.reset_step == 1:
+        email = st.text_input("Enter your registered email:")
+        if st.button("Send OTP"):
+            user = get_user(email)
+            if user:
+                otp = str(random.randint(100000, 999999))
+                st.session_state.otp = otp
+                st.session_state.reset_email = email
+                send_otp(email, otp)
+                st.success("✅ OTP sent to your email.")
+                st.session_state.reset_step = 2
+                st.rerun()
+            else:
+                st.error("❌ Email not registered.")
+
+    # Step 2: Verify OTP
+    elif st.session_state.reset_step == 2:
+        otp_input = st.text_input("Enter OTP sent to your email:")
+        if st.button("Verify OTP"):
+            if otp_input == st.session_state.otp:
+                st.success("✅ OTP verified. Set a new password.")
+                st.session_state.reset_step = 3
+                st.rerun()
+            else:
+                st.error("❌ Incorrect OTP. Try again.")
+
+    # Step 3: Reset Password
+    elif st.session_state.reset_step == 3:
+        new_password = st.text_input("Enter new password:", type="password")
+        confirm_password = st.text_input("Confirm new password:", type="password")
+        if st.button("Reset Password"):
+            if new_password.strip() and new_password == confirm_password:
+                update_password(st.session_state.reset_email, new_password)
+                st.success("✅ Password updated successfully! Please login again.")
+                # Reset state
+                st.session_state.reset_step = 1
+                st.session_state.otp = None
+                st.session_state.reset_email = None
+            else:
+                st.error("❌ Passwords do not match.")
+
 # -------------------------
 # Connection Helper
 # -------------------------
@@ -19,27 +125,59 @@ def get_connection():
     return sqlitecloud.connect(DATABASE_CONNECTION_STRING)
  
 def admin_panel():
-    st.title("🔐 Admin Panel")
- 
+    # -------------------------
+    # Top Row: Title + Back button
+    # -------------------------
+    col1, col2 = st.columns([8, 2])  # Adjust ratios as needed
+    with col1:
+        st.title("🔐 Admin Panel")
+    with col2:
+        if st.session_state.get("login_mode") == "forgot":
+            if st.button("⬅️ Back to Login", use_container_width=True):
+                st.session_state.login_mode = "login"
+                st.session_state.reset_step = 1
+                st.rerun()
+
     # -------------------------
     # Password Protection
     # -------------------------
     PASSWORD = "admin_123"
- 
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
- 
+    
+    if "login_mode" not in st.session_state:
+        st.session_state.login_mode = "login"  # "login" or "forgot"
+
+    # -------------------------
+    # Login / Forgot Password Flow
+    # -------------------------
     if not st.session_state.authenticated:
-        st.subheader("Login Required")
-        password_input = st.text_input("Enter password:", type="password")
-        if st.button("Login"):
-            if password_input == PASSWORD:
-                st.session_state.authenticated = True
-                st.success("✅ Logged in successfully!")
-                st.rerun()
-            else:
-                st.error("❌ Wrong password. Try again.")
-        return
+        if st.session_state.login_mode == "login":
+            st.subheader("Login System")
+            email = st.text_input("Email:")
+            password = st.text_input("Password:", type="password")
+
+            # Login and Forgot Password buttons in same row
+            col1, col2 = st.columns([5, 5])
+            with col1:
+                if st.button("Login", use_container_width=True):
+                    user = get_user(email)
+                    if user and user[1] == password:
+                        st.session_state.authenticated = True
+                        st.success("✅ Logged in successfully!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Invalid Credentials. Try again.")
+
+            with col2:
+                if st.button("Forgot Password?", use_container_width=True):
+                    st.session_state.login_mode = "forgot"
+                    st.rerun()
+
+        elif st.session_state.login_mode == "forgot":
+            forgot_password()
+
+        st.stop()  # stop rendering admin panel if not logged in
  
     # -------------------------
     # Logout and Open in Cloud buttons row
@@ -57,7 +195,6 @@ def admin_panel():
             "🌐 Open in SQLite Cloud",
             DATABASE
         )
- 
  
     st.subheader("📂 Upload CSV Files to SQLite Cloud Database")
  
@@ -106,7 +243,8 @@ def admin_panel():
  
                 # Read headers from raw CSV to preserve exact ordering and names
                 reader = csv.reader(io.StringIO(text))
-                headers = next(reader)
+                raw_headers = next(reader)
+                headers = [h.strip() for h in raw_headers]
  
                 # --- helper: detect whether a series is mostly date-parsable with dayfirst ---
                 def is_date_like(series, min_fraction=0.6):
@@ -122,10 +260,12 @@ def admin_panel():
                 # markers: "int", "float", "datetime", "text"
                 dtypes = {}
                 for h in headers:
-                    h_str = h.strip()
-                    if h_str in sample_df.columns:
-                        col = sample_df[h_str]
+                    # h_str = h.strip()
+                    # if h_str in sample_df.columns:
+                    #     col = sample_df[h_str]
                         # First try date-detection (useful for dd-mm-yyyy)
+                    if not sample_df.empty and h in sample_df.columns:
+                        col = sample_df[h]
                         try:
                             if is_date_like(col):
                                 dtypes[h] = "datetime"
@@ -170,7 +310,7 @@ def admin_panel():
                     return "TEXT"
  
                 cols_def = ", ".join(
-                    f'"{h.strip()}" {sqlite_type_from_marker(dtypes.get(h))}' for h in headers
+                    f'"{h}" {sqlite_type_from_marker(dtypes.get(h))}' for h in headers
                 )
  
                 # Drop/create table (quote table name)
@@ -192,13 +332,17 @@ def admin_panel():
                         if marker == "float":
                             return float(s)
                         if marker == "datetime":
-                            # parse with dayfirst to support dd-mm-yyyy and output ISO (YYYY-MM-DD)
+                            # parse with dayfirst to support dd-mm-yyyy and dd-mm-yyyy HH:MM:SS
                             dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
                             if pd.isna(dt):
                                 # fallback to raw string if parse fails
                                 return s
                             # store just the date portion as ISO (change to dt.isoformat() if you want time)
                             # return dt.date().isoformat()
+                            t = dt.time()
+                            if t.hour == 0 and t.minute == 0 and t.second == 0 and (" " not in s and "T" not in s):
+                                return dt.date().isoformat()
+                            
                             return dt.strftime("%Y-%m-%d %H:%M:%S")
                         # default: text
                         return s
@@ -206,48 +350,46 @@ def admin_panel():
                         # fallback to raw string if conversion fails
                         return s
  
-                # Re-open CSV stream for actual insertion using StringIO(text)
-                reader = csv.reader(io.StringIO(text))
-                next(reader)  # skip header
- 
+                # -------------------------
+                # Read entire CSV with pandas for robust parsing/alignment, then insert in chunks
+                # -------------------------
+                try:
+                    full_df = pd.read_csv(io.StringIO(text), encoding="utf-8", dtype=str)
+                except Exception:
+                    # Fallback: try pandas with more relaxed options
+                    full_df = pd.read_csv(io.StringIO(text), encoding="utf-8", dtype=str, engine="python")
+                # Normalize columns and ensure ordering matches 'headers'
+                full_df.columns = [str(c).strip() for c in full_df.columns]
+                # Ensure all expected headers present; if missing, add as empty columns
+
+                for h in headers:
+                    if h not in full_df.columns:
+                        full_df[h] = None
+                # Reorder to match CSV header order (headers is stripped names)
+                full_df = full_df[headers]
+                # Insert rows in chunks, converting each cell according to dtypes[header]
                 uploaded = 0
-                batch = []
- 
-                # Stream rows and insert with conversion
-                for row in reader:
-                    # align row length with headers (pad or truncate if needed)
-                    if len(row) < len(headers):
-                        row += ["" for _ in range(len(headers) - len(row))]
-                    elif len(row) > len(headers):
-                        row = row[: len(headers)]
- 
-                    converted = [
-                        convert_cell(val, dtypes.get(h))
-                        for val, h in zip(row, headers)
-                    ]
-                    batch.append(converted)
- 
-                    if len(batch) >= CHUNK_SIZE:
+                nrows = len(full_df)
+
+                for start in range(0, nrows, CHUNK_SIZE):
+                    chunk = full_df.iloc[start:start + CHUNK_SIZE]
+                    batch = []
+                    for _, row in chunk.iterrows():
+                        converted_row = [
+                            convert_cell(row[h], dtypes.get(h)) for h in headers
+                        ]
+                        batch.append(converted_row)
+                    if batch:
                         placeholders = ", ".join("?" * len(headers))
                         cur.executemany(
                             f'INSERT INTO "{base_name}" VALUES ({placeholders})', batch
                         )
                         conn.commit()
                         uploaded += len(batch)
-                        batch.clear()
  
                         percent = int(uploaded / max(total_rows, 1) * 100)
                         progress.progress(percent, text=f"{file.name}: {percent}% uploaded")
                         status.text(f"{uploaded}/{total_rows} rows uploaded")
- 
-                # Insert any leftovers
-                if batch:
-                    placeholders = ", ".join("?" * len(headers))
-                    cur.executemany(
-                        f'INSERT INTO "{base_name}" VALUES ({placeholders})', batch
-                    )
-                    conn.commit()
-                    uploaded += len(batch)
  
                 progress.progress(100, text=f"✅ {file.name} upload complete")
                 status.text(f"Finished uploading {uploaded} rows")
@@ -310,3 +452,195 @@ def admin_panel():
             if st.button("❌ Delete Table"):
                 confirm_delete_dialog(selected_table)
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# def admin_panel():
+#     st.title("🔐 Admin Panel")
+ 
+#     # -------------------------
+#     # Password Protection
+#     # -------------------------
+#     PASSWORD = "admin_123"
+ 
+#     if "authenticated" not in st.session_state:
+#         st.session_state.authenticated = False
+    
+#     if "login_mode" not in st.session_state:
+#         st.session_state.login_mode = "login"  # "login" or "forgot"
+    
+
+#     # -------------------------
+#     # If not logged in
+#     # -------------------------
+#     if not st.session_state.authenticated:
+
+#         if st.session_state.login_mode == "login":
+#             st.subheader("Login System")
+
+#             email = st.text_input("Email:")
+#             password = st.text_input("Password:", type="password")
+
+#             # Two buttons in same row
+#             col1, col2 = st.columns([5, 5])
+#             with col1:
+#                 if st.button("Login", use_container_width=True):
+#                     user = get_user(email)
+#                     if user and user[1] == password:   # check against DB password
+#                         st.session_state.authenticated = True
+#                         st.success("✅ Logged in successfully!")
+#                         st.rerun()
+#                     else:
+#                         st.error("❌ Invalid Credentials. Try again.")
+
+#             with col2:
+#                 if st.button("Forgot Password?", use_container_width=True):
+#                     st.session_state.login_mode = "forgot"
+#                     st.rerun()
+
+#         elif st.session_state.login_mode == "forgot":
+#             forgot_password()
+#             if st.button("⬅️ Back to Login"):
+#                 st.session_state.login_mode = "login"
+#                 st.session_state.reset_step = 1
+#                 st.rerun()
+
+#         st.stop()   # stop rendering admin panel if not logged in
+    # if not st.session_state.get("authenticated", False):
+        #     st.subheader("Login Required")
+
+        #     # Enter password and allow pressing Enter
+        #     password_input = st.text_input("Enter password:", type="password", key="password_input")
+
+        #     # Either click Login or press Enter (Enter submits the text_input immediately)
+        #     if st.button("Login") or password_input == PASSWORD:
+        #         if password_input == PASSWORD:
+        #             st.session_state.authenticated = True
+        #             st.success("✅ Logged in successfully!")
+        #             st.rerun()
+        #         else:
+        #             st.error("❌ Wrong password. Try again.")
+        #     st.stop()
