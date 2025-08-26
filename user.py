@@ -12,7 +12,6 @@ load_dotenv()
 
 DATABASE_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
 DATABASE = os.getenv("DATABASE")
- 
 
 # -----------------------------
 # Azure OpenAI client
@@ -28,7 +27,7 @@ client = AzureOpenAI(
 # -----------------------------
 FORBIDDEN_SQL = re.compile(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|ATTACH|REINDEX|VACUUM)\b", re.IGNORECASE)
 
-def load_schema(conn: sqlite3.Connection) -> tuple[str, dict]:
+def load_schema(conn: sqlitecloud.Connection) -> tuple[str, dict]:
     """
     Returns:
       schema_str: human-readable schema text for prompting
@@ -70,49 +69,82 @@ FEW_SHOT = """
 
         User: Count unique patients by region where age > 18
         SQL:
-        SELECT pd.Region, COUNT(DISTINCT p.Patient_ID) AS treated_patients
+        SELECT pd."Region", COUNT(DISTINCT p."Patient_ID") AS treated_patients
         FROM SQL_103_Assessment_Set1_Data_Claims_Data c
-        JOIN SQL_103_Assessment_Set1_Data_Patient_Demographics p ON p.Patient_ID = c.Patient_ID
-        JOIN SQL_103_Assessment_Set1_Data_Physician_Demographics pd ON pd.Physician_ID = c.Physician_ID
-        WHERE p.Age > 18
-        GROUP BY pd.Region;
+        JOIN SQL_103_Assessment_Set1_Data_Patient_Demographics p ON p."Patient_ID" = c."Patient_ID"
+        JOIN SQL_103_Assessment_Set1_Data_Physician_Demographics pd ON pd."Physician_ID" = c."Physician_ID"
+        WHERE p."Age" > 18
+        GROUP BY pd."Region";
 
         User: List 10 most recent claims with physician specialty
         SQL:
-        SELECT c.Claim_ID, c.Date, c.Patient_ID, d.Specialty
+        SELECT c."Claim_ID", c."Date", c."Patient_ID", d."Specialty"
         FROM SQL_103_Assessment_Set1_Data_Claims_Data c
         JOIN SQL_103_Assessment_Set1_Data_Physician_Demographics d
-          ON d.Physician_ID = c.Physician_ID
-        ORDER BY c.Date DESC
+          ON d."Physician_ID" = c."Physician_ID"
+        ORDER BY c."Date" DESC
         LIMIT 10;
         """
 
 def build_generation_prompt(nl_request: str, schema_text: str, schema_summary: str) -> str:
     return f"""
-        You are an expert SQL assistant. Output ONLY a valid SQLite SELECT statement, nothing else.
-        Constraints:
-        - Only SELECT queries are allowed.
-        - Use JOINs when needed.
-        - Use Window functions if needed.
-        - Use explicit table names from the schema.
-        - If grouping/aggregation is required, ensure proper GROUP BY.
-        - Do not include backticks or markdown fences.
-        - Avoid non-SQL commentary.
-        - Make conservative assumptions if names are ambiguous.
+        You are an expert SQL assistant for SQLite. Output ONLY a valid SQLite SELECT statement, nothing else.
 
-        Database schema:
+        Hard constraints:
+        - Only produce a single SELECT query. No explanations, no comments, no extra text.
+        - Use explicit table and column names from the provided schema.
+        - Quote identifiers using double quotes for SQLite (e.g. "Table"."Column").
+        - Do NOT use backticks or markdown fences.
+        - Avoid SELECT *. List columns explicitly unless user asked for all columns.
+        - Use the minimum number of JOINs necessary.
+        - Prefer JOINs using primary/foreign keys from the schema.
+        - Use window functions only when required.
+        - If aggregation is used, include correct GROUP BY clauses.
+        - For ambiguous names, make a conservative assumption and note it only by choosing a safe interpretation (do not output notes).
+        - If the request needs date parsing, convert DD-MM-YYYY to YYYY-MM-DD using SQL functions.
+        - Do not change schema names. Respect case and spacing exactly as given.
+
+        Schema:
         {schema_text}
 
         Schema summary:
         {schema_summary}
 
+        Few-shot examples:
         {FEW_SHOT}
 
-        Natural language request:
+        User request:
         {nl_request}
 
-        Return only the SQL SELECT query.
+        Return only the final SQL SELECT statement.
+
         """
+    # return f"""
+    #     You are an expert SQL assistant. Output ONLY a valid SQLite SELECT statement, nothing else.
+    #     Constraints:
+    #     - Only SELECT queries are allowed.
+    #     - Use minimum number of JOINs.
+    #     - Use alias properly.
+    #     - Use Window functions if needed.
+    #     - Use explicit table names from the schema.
+    #     - If grouping/aggregation is required, ensure proper GROUP BY.
+    #     - Do not include backticks or markdown fences.
+    #     - Avoid non-SQL commentary.
+    #     - Make conservative assumptions if names are ambiguous.
+
+    #     Database schema:
+    #     {schema_text}
+
+    #     Schema summary:
+    #     {schema_summary}
+
+    #     {FEW_SHOT}
+
+    #     Natural language request:
+    #     {nl_request}
+
+    #     Return only the SQL SELECT query.
+    #     """
 
 def build_correction_prompt(original_sql: str, error_msg: str, schema_text: str, nl_request: str, schema_summary: str) -> str:
     return f"""
@@ -142,7 +174,7 @@ def build_correction_prompt(original_sql: str, error_msg: str, schema_text: str,
 def call_llm_sql(prompt: str, temperature: float = 0.0, model: str = "gpt-4o-mini") -> str:
     resp = client.chat.completions.create(
         model=model,
-        temperature=temperature,
+        temperature = temperature,
         messages=[
             {"role": "system", "content": "You generate safe, strictly-SELECT SQLite queries only."},
             {"role": "user", "content": prompt},
@@ -253,8 +285,6 @@ def user_panel(use_cloud: bool = True):
         schema_summary = summarize_schema(schema_map)
         with st.expander("📚 Database schema"):
             st.text(schema_text)
-        # with st.expander("📝 Schema summary"):
-        #     st.text(schema_summary)
 
     # Generate SQL
     if st.button("🧠 Generate SQL"):
@@ -283,7 +313,7 @@ def user_panel(use_cloud: bool = True):
         st.markdown("### Review & Run")
         edited_sql = st.text_area("Edit Query (optional)", value=st.session_state["proposed_sql"], height=160, key="editable_sql")
 
-        col_run, col_clear = st.columns([1, 1])
+        col_run, col_clear = st.columns([3, 1])
         with col_run:
             if st.button("▶️ Run SQL"):
                 if not conn:

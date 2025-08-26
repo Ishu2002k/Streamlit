@@ -6,7 +6,7 @@ from visualize import visualize_panel
 # App Title and Branding
 st.set_page_config(
     initial_sidebar_state="collapsed",
-    page_title="Axtria Data Platform",
+    page_title="GenAI SQL Assistant",
     page_icon="📊",
     layout="wide"
 )

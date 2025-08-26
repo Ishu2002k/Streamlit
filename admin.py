@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import random
 import smtplib
 from email.mime.text import MIMEText 
+import hashlib
 
 
 # Load .env file
@@ -202,196 +203,171 @@ def admin_panel():
     # Upload CSV files only
     # -------------------------
     uploaded_files = st.file_uploader(
-        "Upload CSV files",
+        "Select CSV files (then Click Upload)",
         type=["csv"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        key = "uploader"
     )
+
     CHUNK_SIZE = 500  # Number of rows to insert per batch
- 
-    if uploaded_files:
-        for file in uploaded_files:
-            base_name = os.path.splitext(file.name)[0].strip().replace(" ", "_")
- 
-            # Read file bytes into buffer
-            file_bytes = file.read()
-            # --- Changed: decode bytes once and use StringIO to avoid TextIOWrapper closing issues ---
-            text = file_bytes.decode("utf-8", errors="replace")
- 
-            # Count total rows (excluding header)
-            total_rows = sum(1 for _ in io.StringIO(text)) - 1
- 
-            # Progress bar + status
-            progress = st.progress(0, text=f"Uploading {file.name}...")
-            status = st.empty()
- 
-            with get_connection() as conn:
-                cur = conn.cursor()
- 
-                # -------------------------
-                # Infer dtypes & create table with inferred SQLite types (with dd-mm-yyyy support)
-                # -------------------------
-                # Sample the CSV with pandas to infer column characteristics (uses up to nrows sample)
-                try:
-                    sample_df = pd.read_csv(io.StringIO(text), encoding="utf-8", nrows=1000)
-                except Exception:
-                    # Fallback: empty DataFrame if pandas can't parse sample
-                    sample_df = pd.DataFrame()
- 
-                # Normalize sample columns (strip spaces)
-                if not sample_df.empty:
-                    sample_df.columns = [str(c).strip() for c in sample_df.columns]
- 
-                # Read headers from raw CSV to preserve exact ordering and names
-                reader = csv.reader(io.StringIO(text))
-                raw_headers = next(reader)
-                headers = [h.strip() for h in raw_headers]
- 
-                # --- helper: detect whether a series is mostly date-parsable with dayfirst ---
-                def is_date_like(series, min_fraction=0.6):
-                    # series may contain NaNs; coerce to str for parsing
-                    ser = series.dropna().astype(str)
-                    if ser.empty:
-                        return False
-                    parsed = pd.to_datetime(ser, dayfirst=True, errors="coerce")
-                    frac = parsed.notna().sum() / len(ser)
-                    return frac >= min_fraction
- 
-                # Build a simple marker-based dtype map for each header:
-                # markers: "int", "float", "datetime", "text"
-                dtypes = {}
-                for h in headers:
-                    # First try date-detection (useful for dd-mm-yyyy)
-                    if not sample_df.empty and h in sample_df.columns:
-                        col = sample_df[h]
+
+    # Initialize processed-file fingerprint set in session_state
+    if "processed_files_fingerprints" not in st.session_state:
+        st.session_state.processed_files_fingerprints = set()
+
+    # Option: force re-upload even if identical content was processed before
+    force_reupload = st.checkbox("Force re-upload identical files", value=False)
+
+    # Only show the Start Upload button (no file listing)
+    if st.button("⬆️ Start Upload"):
+        if not uploaded_files:
+            st.info("No files selected.")
+        else:
+            # Build list of new files to process (read bytes once)
+            new_files = []
+            for f in uploaded_files:
+                file_bytes = f.read()  # read bytes once
+                fingerprint = hashlib.sha256(file_bytes).hexdigest()
+                if not force_reupload and fingerprint in st.session_state.processed_files_fingerprints:
+                    st.info(f"Skipping {f.name}: already uploaded in this session.")
+                    continue
+                new_files.append((f.name, file_bytes, fingerprint))
+            if not new_files:
+                st.info("No new files to upload.")
+            else:
+                # PROCESS each new file (your existing processing code)
+                for name, file_bytes, fingerprint in new_files:
+                    st.info(f"Processing file: {name}")
+                    base_name = os.path.splitext(name)[0].strip().replace(" ", "_")
+                    text = file_bytes.decode("utf-8", errors="replace")
+                    total_rows = sum(1 for _ in io.StringIO(text)) - 1
+                    progress = st.progress(0, text=f"Uploading {name}...")
+                    status = st.empty()
+                    with get_connection() as conn:
+                        cur = conn.cursor()
+                        # --- sample & dtype inference (same as before) ---
                         try:
-                            if is_date_like(col):
-                                dtypes[h] = "datetime"
-                                continue
+                            sample_df = pd.read_csv(io.StringIO(text), encoding="utf-8", nrows=1000)
                         except Exception:
-                            pass
- 
-                        # Use pandas' dtype checks
-                        try:
-                            if pd.api.types.is_integer_dtype(col):
-                                dtypes[h] = "int"
-                                continue
-                            if pd.api.types.is_float_dtype(col):
-                                dtypes[h] = "float"
-                                continue
-                        except Exception:
-                            pass
- 
-                        # If pandas kept it object, try coercion to numeric
-                        coerced = pd.to_numeric(col.dropna().astype(str), errors="coerce")
-                        if not coerced.empty and coerced.notna().sum() == len(col.dropna()):
-                            # all non-null values are numeric
-                            # choose int if values are all integral; else float
-                            if (coerced.dropna() % 1 == 0).all():
-                                dtypes[h] = "int"
+                            sample_df = pd.DataFrame()
+                        if not sample_df.empty:
+                            sample_df.columns = [str(c).strip() for c in sample_df.columns]
+                        reader = csv.reader(io.StringIO(text))
+                        raw_headers = next(reader)
+                        headers = [h.strip() for h in raw_headers]
+
+                        def is_date_like(series, min_fraction=0.6):
+                            ser = series.dropna().astype(str)
+                            if ser.empty:
+                                return False
+                            parsed = pd.to_datetime(ser, dayfirst=True, errors="coerce")
+                            frac = parsed.notna().sum() / len(ser)
+                            return frac >= min_fraction
+
+                        dtypes = {}
+                        for h in headers:
+                            if not sample_df.empty and h in sample_df.columns:
+                                col = sample_df[h]
+                                try:
+                                    if is_date_like(col):
+                                        dtypes[h] = "datetime"
+                                        continue
+                                except Exception:
+                                    pass
+                                try:
+                                    if pd.api.types.is_integer_dtype(col):
+                                        dtypes[h] = "int"
+                                        continue
+                                    if pd.api.types.is_float_dtype(col):
+                                        dtypes[h] = "float"
+                                        continue
+                                except Exception:
+                                    pass
+                                coerced = pd.to_numeric(col.dropna().astype(str), errors="coerce")
+                                if not coerced.empty and coerced.notna().sum() == len(col.dropna()):
+                                    if (coerced.dropna() % 1 == 0).all():
+                                        dtypes[h] = "int"
+                                    else:
+                                        dtypes[h] = "float"
+                                else:
+                                    dtypes[h] = "text"
                             else:
-                                dtypes[h] = "float"
-                        else:
-                            dtypes[h] = "text"
-                    else:
-                        dtypes[h] = "text"  # fallback if header not present in sample
- 
-                # Map markers to SQLite affinity/type for CREATE TABLE
-                def sqlite_type_from_marker(marker):
-                    if marker == "int":
-                        return "INTEGER"
-                    if marker == "float":
-                        return "REAL"
-                    if marker == "datetime":
-                        # TIMESTAMP is fine — SQLite treats it as TEXT affinity
-                        return "TIMESTAMP"
-                    return "TEXT"
- 
-                cols_def = ", ".join(
-                    f'"{h}" {sqlite_type_from_marker(dtypes.get(h))}' for h in headers
-                )
- 
-                # Drop/create table (quote table name)
-                cur.execute(f'DROP TABLE IF EXISTS "{base_name}"')
-                cur.execute(f'CREATE TABLE "{base_name}" ({cols_def})')
-                conn.commit()
- 
-                # Helper to convert CSV string cell -> Python value according to marker
-                def convert_cell(val, marker):
-                    if val is None:
-                        return None
-                    s = str(val).strip()
-                    if s == "":
-                        return None
-                    try:
-                        if marker == "int":
-                            # handle "1.0" -> 1
-                            return int(float(s))
-                        if marker == "float":
-                            return float(s)
-                        if marker == "datetime":
-                            # parse with dayfirst to support dd-mm-yyyy and dd-mm-yyyy HH:MM:SS
-                            dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
-                            if pd.isna(dt):
-                                # fallback to raw string if parse fails
-                                return s
-                            # store just the date portion as ISO (change to dt.isoformat() if you want time)
-                            # return dt.date().isoformat()
-                            t = dt.time()
-                            if t.hour == 0 and t.minute == 0 and t.second == 0 and (" " not in s and "T" not in s):
-                                return dt.date().isoformat()
-                            
-                            return dt.strftime("%Y-%m-%d %H:%M:%S")
-                        # default: text
-                        return s
-                    except Exception:
-                        # fallback to raw string if conversion fails
-                        return s
- 
-                # -------------------------
-                # Read entire CSV with pandas for robust parsing/alignment, then insert in chunks
-                # -------------------------
-                try:
-                    full_df = pd.read_csv(io.StringIO(text), encoding="utf-8", dtype=str)
-                except Exception:
-                    # Fallback: try pandas with more relaxed options
-                    full_df = pd.read_csv(io.StringIO(text), encoding="utf-8", dtype=str, engine="python")
-                # Normalize columns and ensure ordering matches 'headers'
-                full_df.columns = [str(c).strip() for c in full_df.columns]
-                # Ensure all expected headers present; if missing, add as empty columns
+                                dtypes[h] = "text"
 
-                for h in headers:
-                    if h not in full_df.columns:
-                        full_df[h] = None
-                # Reorder to match CSV header order (headers is stripped names)
-                full_df = full_df[headers]
-                # Insert rows in chunks, converting each cell according to dtypes[header]
-                uploaded = 0
-                nrows = len(full_df)
+                        def sqlite_type_from_marker(marker):
+                            if marker == "int":
+                                return "INTEGER"
+                            if marker == "float":
+                                return "REAL"
+                            if marker == "datetime":
+                                return "TIMESTAMP"
+                            return "TEXT"
 
-                for start in range(0, nrows, CHUNK_SIZE):
-                    chunk = full_df.iloc[start:start + CHUNK_SIZE]
-                    batch = []
-                    for _, row in chunk.iterrows():
-                        converted_row = [
-                            convert_cell(row[h], dtypes.get(h)) for h in headers
-                        ]
-                        batch.append(converted_row)
-                    if batch:
-                        placeholders = ", ".join("?" * len(headers))
-                        cur.executemany(
-                            f'INSERT INTO "{base_name}" VALUES ({placeholders})', batch
+                        cols_def = ", ".join(
+                            f'"{h}" {sqlite_type_from_marker(dtypes.get(h))}' for h in headers
                         )
+                        cur.execute(f'DROP TABLE IF EXISTS "{base_name}"')
+                        cur.execute(f'CREATE TABLE "{base_name}" ({cols_def})')
                         conn.commit()
-                        uploaded += len(batch)
- 
-                        percent = int(uploaded / max(total_rows, 1) * 100)
-                        progress.progress(percent, text=f"{file.name}: {percent}% uploaded")
-                        status.text(f"{uploaded}/{total_rows} rows uploaded")
- 
-                progress.progress(100, text=f"✅ {file.name} upload complete")
-                status.text(f"Finished uploading {uploaded} rows")
- 
- 
+
+                        def convert_cell(val, marker):
+                            if val is None:
+                                return None
+                            s = str(val).strip()
+                            if s == "":
+                                return None
+                            try:
+                                if marker == "int":
+                                    return int(float(s))
+                                if marker == "float":
+                                    return float(s)
+                                if marker == "datetime":
+                                    dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
+                                    if pd.isna(dt):
+                                        return s
+
+                                    t = dt.time()
+                                    if t.hour == 0 and t.minute == 0 and t.second == 0 and (" " not in s and "T" not in s):
+                                        return dt.date().isoformat()
+                                    return dt.strftime("%Y-%m-%d %H:%M:%S")
+                                return s
+                            except Exception:
+                                return s
+                        try:
+                            full_df = pd.read_csv(io.StringIO(text), encoding="utf-8", dtype=str)
+                        except Exception:
+                            full_df = pd.read_csv(io.StringIO(text), encoding="utf-8", dtype=str, engine="python")
+                        full_df.columns = [str(c).strip() for c in full_df.columns]
+                        for h in headers:
+                            if h not in full_df.columns:
+                                full_df[h] = None
+                        full_df = full_df[headers]
+
+                        uploaded = 0
+                        nrows = len(full_df)
+                        for start in range(0, nrows, CHUNK_SIZE):
+                            chunk = full_df.iloc[start:start + CHUNK_SIZE]
+                            batch = []
+                            for _, row in chunk.iterrows():
+                                converted_row = [convert_cell(row[h], dtypes.get(h)) for h in headers]
+                                batch.append(converted_row)
+
+                            if batch:
+                                placeholders = ", ".join("?" * len(headers))
+                                cur.executemany(
+                                    f'INSERT INTO "{base_name}" VALUES ({placeholders})', batch
+                                )
+                                conn.commit()
+                                uploaded += len(batch)
+                                percent = int(uploaded / max(total_rows, 1) * 100)
+                                progress.progress(percent, text=f"{name}: {percent}% uploaded")
+                                status.text(f"{uploaded}/{total_rows} rows uploaded")
+
+                        progress.progress(100, text=f"✅ {name} upload complete")
+                        status.text(f"Finished uploading {uploaded} rows")
+
+                    # mark fingerprint as processed so subsequent reruns skip it
+                    st.session_state.processed_files_fingerprints.add(fingerprint)
     # -------------------------
     # Fetch Tables Function
     # -------------------------

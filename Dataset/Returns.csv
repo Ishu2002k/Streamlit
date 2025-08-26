@@ -1,0 +1,151 @@
+Return_ID,Order_ID,Return_Reason
+R0001,O0096,Late Delivery
+R0002,O0001,Wrong Item
+R0003,O0069,Late Delivery
+R0004,O0004,Customer Dissatisfied
+R0005,O0016,Customer Dissatisfied
+R0006,O0024,Damaged
+R0007,O0080,Late Delivery
+R0008,O0002,Wrong Item
+R0009,O0128,Customer Dissatisfied
+R0010,O0160,Customer Dissatisfied
+R0011,O0084,Wrong Item
+R0012,O0152,Wrong Item
+R0013,O0140,Customer Dissatisfied
+R0014,O0178,Customer Dissatisfied
+R0015,O0163,Wrong Item
+R0016,O0124,Customer Dissatisfied
+R0017,O0033,Damaged
+R0018,O0161,Damaged
+R0019,O0189,Wrong Item
+R0020,O0179,Late Delivery
+R0021,O0171,Wrong Item
+R0022,O0101,Wrong Item
+R0023,O0012,Late Delivery
+R0024,O0067,Late Delivery
+R0025,O0065,Late Delivery
+R0026,O0161,Damaged
+R0027,O0168,Customer Dissatisfied
+R0028,O0074,Damaged
+R0029,O0043,Customer Dissatisfied
+R0030,O0044,Damaged
+R0031,O0029,Customer Dissatisfied
+R0032,O0141,Damaged
+R0033,O0012,Late Delivery
+R0034,O0095,Wrong Item
+R0035,O0046,Damaged
+R0036,O0130,Customer Dissatisfied
+R0037,O0035,Late Delivery
+R0038,O0081,Damaged
+R0039,O0090,Damaged
+R0040,O0008,Late Delivery
+R0041,O0093,Damaged
+R0042,O0154,Wrong Item
+R0043,O0090,Damaged
+R0044,O0162,Wrong Item
+R0045,O0115,Wrong Item
+R0046,O0105,Late Delivery
+R0047,O0135,Damaged
+R0048,O0196,Late Delivery
+R0049,O0058,Damaged
+R0050,O0114,Damaged
+R0051,O0075,Customer Dissatisfied
+R0052,O0157,Damaged
+R0053,O0120,Late Delivery
+R0054,O0164,Wrong Item
+R0055,O0021,Damaged
+R0056,O0164,Customer Dissatisfied
+R0057,O0138,Late Delivery
+R0058,O0101,Damaged
+R0059,O0152,Late Delivery
+R0060,O0192,Customer Dissatisfied
+R0061,O0177,Customer Dissatisfied
+R0062,O0099,Late Delivery
+R0063,O0036,Damaged
+R0064,O0096,Wrong Item
+R0065,O0152,Customer Dissatisfied
+R0066,O0151,Damaged
+R0067,O0190,Damaged
+R0068,O0037,Wrong Item
+R0069,O0012,Customer Dissatisfied
+R0070,O0113,Customer Dissatisfied
+R0071,O0183,Damaged
+R0072,O0013,Damaged
+R0073,O0023,Wrong Item
+R0074,O0099,Wrong Item
+R0075,O0105,Customer Dissatisfied
+R0076,O0030,Late Delivery
+R0077,O0017,Customer Dissatisfied
+R0078,O0113,Damaged
+R0079,O0062,Customer Dissatisfied
+R0080,O0084,Late Delivery
+R0081,O0112,Wrong Item
+R0082,O0086,Late Delivery
+R0083,O0141,Late Delivery
+R0084,O0187,Late Delivery
+R0085,O0019,Wrong Item
+R0086,O0177,Late Delivery
+R0087,O0100,Late Delivery
+R0088,O0140,Late Delivery
+R0089,O0189,Damaged
+R0090,O0147,Late Delivery
+R0091,O0076,Wrong Item
+R0092,O0009,Late Delivery
+R0093,O0199,Late Delivery
+R0094,O0028,Wrong Item
+R0095,O0128,Late Delivery
+R0096,O0052,Wrong Item
+R0097,O0083,Late Delivery
+R0098,O0111,Wrong Item
+R0099,O0144,Late Delivery
+R0100,O0117,Late Delivery
+R0101,O0069,Damaged
+R0102,O0099,Damaged
+R0103,O0140,Late Delivery
+R0104,O0025,Late Delivery
+R0105,O0180,Customer Dissatisfied
+R0106,O0123,Wrong Item
+R0107,O0053,Customer Dissatisfied
+R0108,O0151,Damaged
+R0109,O0144,Damaged
+R0110,O0057,Damaged
+R0111,O0039,Damaged
+R0112,O0109,Late Delivery
+R0113,O0181,Damaged
+R0114,O0042,Late Delivery
+R0115,O0186,Late Delivery
+R0116,O0167,Damaged
+R0117,O0142,Damaged
+R0118,O0122,Wrong Item
+R0119,O0133,Customer Dissatisfied
+R0120,O0163,Damaged
+R0121,O0075,Wrong Item
+R0122,O0146,Wrong Item
+R0123,O0076,Customer Dissatisfied
+R0124,O0009,Late Delivery
+R0125,O0074,Damaged
+R0126,O0186,Customer Dissatisfied
+R0127,O0145,Damaged
+R0128,O0007,Wrong Item
+R0129,O0174,Wrong Item
+R0130,O0141,Late Delivery
+R0131,O0168,Wrong Item
+R0132,O0170,Wrong Item
+R0133,O0137,Customer Dissatisfied
+R0134,O0178,Damaged
+R0135,O0027,Damaged
+R0136,O0122,Customer Dissatisfied
+R0137,O0194,Late Delivery
+R0138,O0005,Damaged
+R0139,O0029,Wrong Item
+R0140,O0165,Damaged
+R0141,O0166,Wrong Item
+R0142,O0083,Late Delivery
+R0143,O0136,Customer Dissatisfied
+R0144,O0109,Damaged
+R0145,O0065,Customer Dissatisfied
+R0146,O0086,Damaged
+R0147,O0145,Wrong Item
+R0148,O0071,Customer Dissatisfied
+R0149,O0045,Damaged
+R0150,O0132,Wrong Item
