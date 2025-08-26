@@ -215,15 +215,6 @@ def user_panel(use_cloud: bool = True):
     temperature = st.sidebar.slider("Model temperature", 0.0, 1.0, 0.0, 0.1)
     # model_name = st.sidebar.selectbox("Model", ["gpt-4o-mini", "gpt-4o", "gpt-4o-mini-transcribe"], index=0)
     model_name = "gpt-4o-mini"
-
-    # Database path (use the same DB the admin writes to)
-    # db_path = st.sidebar.text_input("SQLite DB file", value="uploaded_db.sqlite", help="Path to your SQLite database file")
-    # if not os.path.exists(db_path):
-    #     st.info("No database found yet. Upload tables in the Admin panel to create 'uploaded_db.sqlite'.")
-    #     # Still allow user to type prompt, but we can't run without DB.
-    # conn = None
-    # if os.path.exists(db_path):
-    #     conn = sqlite3.connect(db_path)
     
     if use_cloud:
         conn = sqlitecloud.connect(DATABASE_CONNECTION_STRING)
