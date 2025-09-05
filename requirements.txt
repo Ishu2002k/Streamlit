@@ -9,3 +9,10 @@ sqlalchemy
 dotenv
 sqlitecloud
 sendgrid
+sqlglot
+sentence-transformers
+faiss-cpu
+plotly
+langgraph
+openai
+python-dotenv

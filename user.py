@@ -119,32 +119,6 @@ def build_generation_prompt(nl_request: str, schema_text: str, schema_summary: s
         Return only the final SQL SELECT statement.
 
         """
-    # return f"""
-    #     You are an expert SQL assistant. Output ONLY a valid SQLite SELECT statement, nothing else.
-    #     Constraints:
-    #     - Only SELECT queries are allowed.
-    #     - Use minimum number of JOINs.
-    #     - Use alias properly.
-    #     - Use Window functions if needed.
-    #     - Use explicit table names from the schema.
-    #     - If grouping/aggregation is required, ensure proper GROUP BY.
-    #     - Do not include backticks or markdown fences.
-    #     - Avoid non-SQL commentary.
-    #     - Make conservative assumptions if names are ambiguous.
-
-    #     Database schema:
-    #     {schema_text}
-
-    #     Schema summary:
-    #     {schema_summary}
-
-    #     {FEW_SHOT}
-
-    #     Natural language request:
-    #     {nl_request}
-
-    #     Return only the SQL SELECT query.
-    #     """
 
 def build_correction_prompt(original_sql: str, error_msg: str, schema_text: str, nl_request: str, schema_summary: str) -> str:
     return f"""
