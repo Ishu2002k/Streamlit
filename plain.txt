@@ -1,0 +1,20 @@
+Schema Info: {'tables': {'Orders': {'columns': [{'name': 'Order_ID', 'type': 'TEXT'}, {'name': 'Person_ID', 'type': 'TEXT'}, {'name': 'Order_Date', 'type': 'DATE'}, {'name': 'Amount', 'type': 'INTEGER'}], 'examples': [{'Order_ID': 'O0001', 'Person_ID': 'P063', 'Order_Date': '2023-01-01', 'Amount': 4161}, {'Order_ID': 'O0002', 'Person_ID': 'P018', 'Order_Date': '2023-01-02', 'Amount': 3469}, {'Order_ID': 'O0003', 'Person_ID': 'P090', 'Order_Date': '2023-01-03', 'Amount': 362}]}, 'People': {'columns': [{'name': 'Person_ID', 'type': 'TEXT'}, {'name': 'Person_Name', 'type': 'TEXT'}, {'name': 'Region', 'type': 'TEXT'}], 'examples': [{'Person_ID': 'P001', 'Person_Name': 'Person_1', 'Region': 'Central'}, {'Person_ID': 'P002', 'Person_Name': 'Person_2', 'Region': 'South'}, {'Person_ID': 'P003', 'Person_Name': 'Person_3', 'Region': 'East'}]}, 'Returns': {'columns': [{'name': 'Return_ID', 'type': 'TEXT'}, {'name': 'Order_ID', 'type': 'TEXT'}, {'name': 'Return_Reason', 'type': 'TEXT'}], 'examples': [{'Return_ID': 'R0001', 'Order_ID': 'O0096', 'Return_Reason': 'Late Delivery'}, {'Return_ID': 'R0002', 'Order_ID': 'O0001', 'Return_Reason': 'Wrong Item'}, {'Return_ID': 'R0003', 'Order_ID': 'O0069', 'Return_Reason': 'Late Delivery'}]}}, 'relationships': [{'from_table': 'Orders', 'from_column': 'Order_ID', 'to_table': 'Returns', 'to_column': 'Order_ID', 'type': 'value_overlap'}, {'from_table': 'Orders', 'from_column': 'Person_ID', 'to_table': 'People', 'to_column': 'Person_ID', 'type': 'value_overlap'}, {'from_table': 'People', 'from_column': 'Person_ID', 'to_table': 'Orders', 'to_column': 'Person_ID', 'type': 'value_overlap'}, {'from_table': 'Returns', 'from_column': 'Order_ID', 'to_table': 'Orders', 'to_column': 'Order_ID', 'type': 'value_overlap'}]}
+
+Embedding Texts:
+{'id': 'table::Orders', 'text': 'Table: Orders. Columns: Order_ID (TEXT), Person_ID (TEXT), Order_Date (DATE), Amount (INTEGER).'}
+{'id': 'column::Orders.Order_ID', 'text': 'Column: Order_ID in Orders. Type: TEXT.'}
+{'id': 'column::Orders.Person_ID', 'text': 'Column: Person_ID in Orders. Type: TEXT.'}
+{'id': 'column::Orders.Order_Date', 'text': 'Column: Order_Date in Orders. Type: DATE.'}
+{'id': 'column::Orders.Amount', 'text': 'Column: Amount in Orders. Type: INTEGER.'}
+{'id': 'table::People', 'text': 'Table: People. Columns: Person_ID (TEXT), Person_Name (TEXT), Region (TEXT).'}
+{'id': 'column::People.Person_ID', 'text': 'Column: Person_ID in People. Type: TEXT.'}
+{'id': 'column::People.Person_Name', 'text': 'Column: Person_Name in People. Type: TEXT.'}
+{'id': 'column::People.Region', 'text': 'Column: Region in People. Type: TEXT.'}
+{'id': 'table::Returns', 'text': 'Table: Returns. Columns: Return_ID (TEXT), Order_ID (TEXT), Return_Reason (TEXT).'}
+{'id': 'column::Returns.Return_ID', 'text': 'Column: Return_ID in Returns. Type: TEXT.'}
+{'id': 'column::Returns.Order_ID', 'text': 'Column: Order_ID in Returns. Type: TEXT.'}
+{'id': 'column::Returns.Return_Reason', 'text': 'Column: Return_Reason in Returns. Type: TEXT.'}
+{'id': 'rel::Orders.Order_ID->Returns.Order_ID', 'text': 'Relationship: Orders.Order_ID -> Returns.Order_ID (value_overlap).'}
+{'id': 'rel::Orders.Person_ID->People.Person_ID', 'text': 'Relationship: Orders.Person_ID -> People.Person_ID (value_overlap).'}
+{'id': 'rel::People.Person_ID->Orders.Person_ID', 'text': 'Relationship: People.Person_ID -> Orders.Person_ID (value_overlap).'}
+{'id': 'rel::Returns.Order_ID->Orders.Order_ID', 'text': 'Relationship: Returns.Order_ID -> Orders.Order_ID (value_overlap).'}

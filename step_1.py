@@ -9,6 +9,11 @@ import random
 load_dotenv()
 db_path = os.getenv("DATABASE_CONNECTION_STRING")
 
+# ------------------ Utility ------------------
+def quote_identifier(name: str) -> str:
+    """Safely quote SQL identifiers (tables/columns)."""
+    return f'"{name}"'
+
 def guess_column_type(values):
     """
     Infer a more semantic column type from sample values.
@@ -51,8 +56,17 @@ def guess_column_type(values):
 
     return "TEXT"
 
+def fetch_table_name(db_path):
+    conn = sqlitecloud.connect(db_path)
+    cursor = conn.cursor()
 
-def extract_schema(db_path,sample_limit = 1000,example_limit = 5):
+    # 1. Get all tables
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' and name NOT LIKE '_sqlite%';")
+    tables = [row[0] for row in cursor.fetchall()]
+
+    return tables
+
+def extract_schema(db_path,sample_limit = 200,example_limit = 3):
     """
     Extracts schema info, column details, and relationships from SQLite database.
     Args:
@@ -62,24 +76,24 @@ def extract_schema(db_path,sample_limit = 1000,example_limit = 5):
     """
     conn = sqlitecloud.connect(db_path)
     cursor = conn.cursor()
-    schema_info = {"tables": {}, "relationships": [], "examples": []}
+    schema_info = {"tables": {}, "relationships": []}
 
     # 1. Get all tables
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' and name NOT LIKE '_sqlite%';")
     tables = [row[0] for row in cursor.fetchall()]
 
     for table in tables:
-        schema_info["tables"][table] = {"columns": []}
+        schema_info["tables"][table] = {"columns": [],"examples":[]}
 
         # 2. Get column details
-        cursor.execute(f"PRAGMA table_info({table});")
+        cursor.execute(f"PRAGMA table_info({quote_identifier(table)});")
         columns = cursor.fetchall()
 
         for col in columns:
             col_name, declared_type = col[1], col[2]
 
             # --- NEW: sample values to refine datatype ---
-            cursor.execute(f"SELECT {col_name} FROM \"{table}\" LIMIT 50;")
+            cursor.execute(f"SELECT {quote_identifier(col_name)} FROM {quote_identifier(table)} LIMIT 30;")
             sample_values = [row[0] for row in cursor.fetchall()]
             inferred_type = guess_column_type(sample_values)
 
@@ -90,8 +104,19 @@ def extract_schema(db_path,sample_limit = 1000,example_limit = 5):
                 {"name": col_name, "type": col_type}
             )
 
+        try:
+            cursor.execute(f"select * from {quote_identifier(table)} LIMIT {example_limit};")
+            rows = cursor.fetchall()
+            col_names = [desc[0] for desc in cursor.description]
+            for row in rows:
+                schema_info["tables"][table]["examples"].append(
+                    dict(zip(col_names,row))
+                )
+        except Exception:
+            pass
+
         # 3. Get foreign key constraints (if explicitly defined)
-        cursor.execute(f"PRAGMA foreign_key_list({table});")
+        cursor.execute(f"PRAGMA foreign_key_list({quote_identifier(table)});")
         fks = cursor.fetchall()
         for fk in fks:
             schema_info["relationships"].append({
@@ -102,8 +127,6 @@ def extract_schema(db_path,sample_limit = 1000,example_limit = 5):
                 "type": "foreign_key"
             })
 
-    # schema = list(schema_info["tables"].keys())
-
     for from_table in tables:
         from_columns = schema_info['tables'][from_table]["columns"]
 
@@ -112,7 +135,7 @@ def extract_schema(db_path,sample_limit = 1000,example_limit = 5):
             col_type = from_col["type"]
 
             # Heuristics: column ends with id
-            if(col_name.endswith("-id")):
+            if(col_name.endswith("_id")):
                 base_name = col_name.replace("_id","")
                 candidates = [base_name, base_name + "s"]
 
@@ -163,26 +186,6 @@ def extract_schema(db_path,sample_limit = 1000,example_limit = 5):
                         except Exception:
                             continue
                         
-    # 5. Extract row-level examples
-    for table in tables:
-        try:
-            cursor.execute(f"SELECT * FROM \"{table}\";")
-            rows = cursor.fetchall()
-            col_names = [desc[0] for desc in cursor.description]
-
-            # Randomly sample up to 5 rows
-            sampled_rows = random.sample(rows, min(len(rows), example_limit))
-
-            for i, row in enumerate(sampled_rows):
-                values = dict(zip(col_names, row))
-                schema_info["examples"].append({
-                    "table": table,
-                    "id": f"{table}_row_{i+1}",
-                    "values": values
-                })
-        except Exception as e:
-            print(f"⚠️ Could not extract examples from table '{table}': {e}")
-
     conn.close()
     return schema_info
 
@@ -211,23 +214,23 @@ def generate_embedding_text(schema_info,sample_rows = 5):
             embedding_docs.append({"id": f"column::{table}.{col['name']}", "text": text})
 
         # Example rows
-        try:
-            cursor.execute(f"SELECT * FROM \"{table}\";")
-            rows = cursor.fetchall()
-            col_names = [c['name'] for c in details["columns"]]
+        # try:
+        #     cursor.execute(f"SELECT * FROM \"{table}\";")
+        #     rows = cursor.fetchall()
+        #     col_names = [c['name'] for c in details["columns"]]
 
-            # Randomly sample up to 5 rows
-            sampled_rows = random.sample(rows, min(len(rows), sample_rows))
+        #     # Randomly sample up to 5 rows
+        #     sampled_rows = random.sample(rows, min(len(rows), sample_rows))
 
-            for idx, row in enumerate(sampled_rows):
-                row_desc = ", ".join(f"{col_names[i]}={row[i]}" for i in range(len(row)))
-                text = f"Example Row from {table}: {row_desc}."
-                embedding_docs.append({
-                    "id": f"row::{table}::{idx}",
-                    "text": text
-                })
-        except Exception as e:
-            print(f"Warning: Could not fetch sample rows for {table}: {e}")
+        #     for idx, row in enumerate(sampled_rows):
+        #         row_desc = ", ".join(f"{col_names[i]}={row[i]}" for i in range(len(row)))
+        #         text = f"Example Row from {table}: {row_desc}."
+        #         embedding_docs.append({
+        #             "id": f"row::{table}::{idx}",
+        #             "text": text
+        #         })
+        # except Exception as e:
+        #     print(f"Warning: Could not fetch sample rows for {table}: {e}")
 
     # Relationship-level text
     for rel in schema_info["relationships"]:

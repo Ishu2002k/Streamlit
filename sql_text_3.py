@@ -1,5 +1,5 @@
 # step_3.py
-
+import sqlparse
 import os
 import sqlitecloud
 import pandas as pd
@@ -7,14 +7,13 @@ import plotly.express as px
 from dotenv import load_dotenv
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
-from step_1 import extract_schema, generate_embedding_text
+from step_1 import extract_schema, generate_embedding_text,fetch_table_name
 from openai import AzureOpenAI
 from sql_txt_2 import (
     generate_embeddings_hf,
     build_schema_kg,
     find_join_path,
-    build_faiss_vectorstore,
-    build_chroma_vectorstore,
+    build_faiss_vectorstore
 )
 
 # -------- Load env --------
@@ -68,6 +67,47 @@ def visualize_results(df: pd.DataFrame):
     else:
         print(df)
 
+# ----------------- KG VALIDATION -----------------
+def validate_sql_with_kg(sql_query, kg):
+    parsed = sqlparse.parse(sql_query)
+    if not parsed:
+        return False, ["❌ SQL parsing failed"]
+
+    stmt = parsed[0]
+    tokens = [t for t in stmt.tokens if not t.is_whitespace]
+
+    used_tables, used_columns = set(), set()
+    hints = []
+
+    for token in tokens:
+        tval = token.value.strip().replace("`", "").replace('"', "")
+        if "." in tval:  
+            used_columns.add(tval)
+            table = tval.split(".")[0]
+            used_tables.add(table)
+        else:
+            if tval.upper() not in ["SELECT", "FROM", "WHERE", "JOIN", "ON",
+                                    "GROUP", "BY", "ORDER", "LIMIT", "AND", "OR"]:
+                used_tables.add(tval)
+
+    # KG tables & columns
+    kg_tables = {n for n, d in kg.nodes(data=True) if d.get("type") == "table"}
+    kg_columns = {n for n, d in kg.nodes(data=True) if d.get("type") == "column"}
+
+    # Validate columns
+    for c in used_columns:
+        if c not in kg_columns:
+            table, col = c.split(".")[0], c.split(".")[1]
+            if table in kg_tables:
+                hints.append(
+                    f"Column '{col}' not found in {table}. "
+                    f"Suggested join path: {find_join_path(kg, table, 'People')}"
+                )
+            else:
+                hints.append(f"Column '{c}' not found in KG.")
+
+    return (len(hints) == 0), hints
+
 # ----------- Hybrid RAG + KG Pipeline ----------------
 def answer_query(nl_query, vectorstore, kg):
     # Step 1: Retrieve semantic context from FAISS/Chroma
@@ -86,15 +126,19 @@ def answer_query(nl_query, vectorstore, kg):
 
     # Step 3: Prompt LLM with hybrid context
     system_prompt = """
-    You are an expert SQL query generator.
-    Generate a **SELECT-only** SQL query for SQLite. 
-    Do NOT generate INSERT, UPDATE, DELETE, DROP, TRUNCATE.
-    Generate valid SQL query for the user query.
-    Use provided schema context and relationships.
-    Take care of values in the table irrespective user asked in capital or in lower case.
-    Do not explain. No backticks.
-    Ensure SQL is valid for SQLite.
-    Only return SQL, nothing else."""
+        You are an expert SQL query generator.
+        Use ONLY these table names exactly as given:
+        {fetch_table_name(db_path)}
+        Generate a **SELECT-only** SQL query for SQLite. 
+        Do NOT generate INSERT, UPDATE, DELETE, DROP, TRUNCATE.
+        Generate valid SQL query for the user query.
+        Use provided schema context and relationships.
+        Take care of values in the table irrespective user asked in capital or in lower case.
+        Do not explain. No backticks.
+        Properly which column is present in which table.
+        Do not assign any column name to any table.
+        Only return SQL, nothing else.
+    """
 
     user_prompt = f"""
     Natural language query:
@@ -111,9 +155,30 @@ def answer_query(nl_query, vectorstore, kg):
 
     print("\n✅ Generated SQL:\n", sql_query)
 
-    # Step 4: Execute SQL
+    # Step 4: KG Validation
+    is_valid, hints = validate_sql_with_kg(sql_query, kg)
+
+    # Step 5: Execute SQL
+    if not is_valid:
+        print("\n⚠️ KG Validation failed with hints:", hints)
+
+        correction_prompt = f"""
+        Use Only these tables name:
+        {fetch_table_name(db_path)}
+        The previous SQL had schema issues:
+        {hints}
+
+        Please regenerate a corrected SQL query for:
+        {nl_query}
+
+        Use schema + KG hints correctly this time.
+        """
+
+        sql_query = llm_complete(system_prompt, correction_prompt)
+        print("\n✅ Corrected SQL:\n", sql_query)
+
     df = run_sql_query(sql_query)
-    print("\n📊 Query Results:\n", df.head())
+    print("\n📊 Query Results:\n", df)
 
     # Step 5: Visualization
     # visualize_results(df)
@@ -136,5 +201,5 @@ if __name__ == "__main__":
     G = build_schema_kg(schema_info)
 
     # Example NL query
-    nl_query = "Find all the person with region they belong who have returned atleast one order"
+    nl_query = "Find all the People with region they belong who have returned atleast one order"
     answer_query(nl_query, vectorstore, G)
