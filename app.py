@@ -1,7 +1,15 @@
 import streamlit as st
+import os
+from dotenv import load_dotenv
+
 from admin import admin_panel
 from user import user_panel
 from visualize import visualize_panel
+
+# --- Load Environment Variables ---
+# This ensures we consistently use the database connection string everywhere.
+load_dotenv()
+DATABASE_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
 
 # App Title and Branding
 st.set_page_config(
@@ -104,9 +112,11 @@ elif st.session_state.page == "user":
 # --- Visualization Page ---
 elif st.session_state.page == "visualize":
     st.sidebar.button("⬅️ Back to Home", on_click=lambda: st.session_state.update(page="home"))
-    visualize_panel("uploaded_db.sqlite")  # ⬅️ database file path
-
-
-
-
-
+    
+    # --- IMPORTANT CHANGE ---
+    # Instead of a hardcoded local file, we now pass the consistent
+    # database connection string from your .env file.
+    if DATABASE_CONNECTION_STRING:
+        visualize_panel(DATABASE_CONNECTION_STRING)
+    else:
+        st.error("DATABASE_CONNECTION_STRING not found in .env file. Please configure it in your .env file.")

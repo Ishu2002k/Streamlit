@@ -1,350 +1,571 @@
-import os
-import re
-import sqlite3
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import re
+from graph_logic import create_graph_app
 from dotenv import load_dotenv
-from openai import AzureOpenAI
-import sqlitecloud  # Use sqlitecloud
+import os
 
-# Load .env file
-load_dotenv()
-
-DATABASE_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
-DATABASE = os.getenv("DATABASE")
-
-# -----------------------------
-# Azure OpenAI client
-# -----------------------------
-client = AzureOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    api_version=os.getenv("OPENAI_API_VERSION"),
+# Your imports from your custom modules
+from step_1 import extract_schema, generate_embedding_text
+from sql_txt_2 import (
+    generate_embeddings_hf,
+    build_faiss_vectorstore,
+    build_schema_kg,
 )
 
-# -----------------------------
-# Helpers
-# -----------------------------
-FORBIDDEN_SQL = re.compile(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|ATTACH|REINDEX|VACUUM)\b", re.IGNORECASE)
+# --- NEW: Import your database connector directly for the manual query ---
+import sqlitecloud
 
-def load_schema(conn: sqlitecloud.Connection) -> tuple[str, dict]:
+# -------- Load env --------
+load_dotenv()
+db_path = os.getenv("DATABASE_CONNECTION_STRING")
+
+# ===================================================================
+# --- NEW: HELPER FUNCTIONS FOR DIRECT SQL EXECUTION ---
+# ===================================================================
+
+def enforce_select_only(sql: str):
     """
-    Returns:
-      schema_str: human-readable schema text for prompting
-      schema_map: dict {table_name: [(col_name, col_type), ...]}
+    A simple but crucial security guardrail. Returns (is_safe, message).
     """
-    tables = pd.read_sql(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' and name NOT LIKE '_sqlite%';",
-        conn
-    )["name"].tolist()
-
-    schema_parts = []
-    schema_map = {}
-
-    for table in tables:
-        df_info = pd.read_sql(f"PRAGMA table_info({table});", conn)
-        cols = [(r["name"], r["type"]) for _, r in df_info.iterrows()]
-        schema_map[table] = cols
-        cols_text = ", ".join([f"{c} ({t or 'TEXT'})" for c, t in cols])
-        schema_parts.append(f"Table: {table}\nColumns: {cols_text}")
-
-    schema_str = "\n\n".join(schema_parts) if schema_parts else "No user tables found."
-    return schema_str, schema_map
-
-def summarize_schema(schema_map: dict) -> str:
-    """
-    Lightweight NL summary (no extra LLM call).
-    """
-    lines = []
-    for t, cols in schema_map.items():
-        colnames = [c for c, _ in cols]
-        key_hints = [c for c in colnames if c.lower().endswith("_id") or c.lower() in {"id", "patient_id", "physician_id"}]
-        lines.append(
-            f"- {t}: {len(cols)} columns; possible keys: {', '.join(key_hints) if key_hints else 'n/a'}."
-        )
-    return "\n".join(lines)
-
-FEW_SHOT = """
-        Examples (SQLite):
-
-        User: Count unique patients by region where age > 18
-        SQL:
-        SELECT pd."Region", COUNT(DISTINCT p."Patient_ID") AS treated_patients
-        FROM SQL_103_Assessment_Set1_Data_Claims_Data c
-        JOIN SQL_103_Assessment_Set1_Data_Patient_Demographics p ON p."Patient_ID" = c."Patient_ID"
-        JOIN SQL_103_Assessment_Set1_Data_Physician_Demographics pd ON pd."Physician_ID" = c."Physician_ID"
-        WHERE p."Age" > 18
-        GROUP BY pd."Region";
-
-        User: List 10 most recent claims with physician specialty
-        SQL:
-        SELECT c."Claim_ID", c."Date", c."Patient_ID", d."Specialty"
-        FROM SQL_103_Assessment_Set1_Data_Claims_Data c
-        JOIN SQL_103_Assessment_Set1_Data_Physician_Demographics d
-          ON d."Physician_ID" = c."Physician_ID"
-        ORDER BY c."Date" DESC
-        LIMIT 10;
-        """
-
-def build_generation_prompt(nl_request: str, schema_text: str, schema_summary: str) -> str:
-    return f"""
-        You are an expert SQL assistant for SQLite. Output ONLY a valid SQLite SELECT statement, nothing else.
-
-        Hard constraints:
-        - Only produce a single SELECT query. No explanations, no comments, no extra text.
-        - Use explicit table and column names from the provided schema.
-        - Quote identifiers using double quotes for SQLite (e.g. "Table"."Column").
-        - Do NOT use backticks or markdown fences.
-        - Avoid SELECT *. List columns explicitly unless user asked for all columns.
-        - Use the minimum number of JOINs necessary.
-        - Prefer JOINs using primary/foreign keys from the schema.
-        - Use window functions only when required.
-        - If aggregation is used, include correct GROUP BY clauses.
-        - For ambiguous names, make a conservative assumption and note it only by choosing a safe interpretation (do not output notes).
-        - If the request needs date parsing, convert DD-MM-YYYY to YYYY-MM-DD using SQL functions.
-        - Do not change schema names. Respect case and spacing exactly as given.
-
-        Schema:
-        {schema_text}
-
-        Schema summary:
-        {schema_summary}
-
-        Few-shot examples:
-        {FEW_SHOT}
-
-        User request:
-        {nl_request}
-
-        Return only the final SQL SELECT statement.
-
-        """
-
-def build_correction_prompt(original_sql: str, error_msg: str, schema_text: str, nl_request: str, schema_summary: str) -> str:
-    return f"""
-        The following SQLite SELECT query failed. Fix it and return ONLY a corrected SELECT query.
-
-        Original request:
-        {nl_request}
-
-        Schema:
-        {schema_text}
-
-        Schema summary:
-        {schema_summary}
-
-        Original SQL:
-        {original_sql}
-
-        Error:
-        {error_msg}
-
-        Rules:
-        - Return only a valid SQLite SELECT query (no DDL/DML).
-        - Use tables/columns that exist.
-        - No markdown code fences.
-        """
-
-def call_llm_sql(prompt: str, temperature: float = 0.0, model: str = "gpt-4o-mini") -> str:
-    resp = client.chat.completions.create(
-        model=model,
-        temperature = temperature,
-        messages=[
-            {"role": "system", "content": "You generate safe, strictly-SELECT SQLite queries only."},
-            {"role": "user", "content": prompt},
-        ],
+    # Use a case-insensitive search to find forbidden keywords
+    forbidden_keywords = re.compile(
+        r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|ATTACH|REINDEX|VACUUM)\b",
+        re.IGNORECASE
     )
-    sql = resp.choices[0].message.content.strip()
-    # Strip code fences if the model adds them
-    sql = sql.replace("```sql", "").replace("```", "").strip()
-    return sql
-
-def enforce_select_only(sql: str) -> tuple[bool, str]:
-    """
-    Returns (ok, message). ok=False means block execution.
-    """
-    if not sql.strip().lower().startswith("select"):
-        return False, "Only SELECT queries are allowed."
-    if FORBIDDEN_SQL.search(sql):
-        return False, "Detected a non-SELECT operation. Only SELECT is allowed."
+    if not sql.strip().upper().startswith("SELECT"):
+        return False, "Query must be a SELECT statement."
+    if forbidden_keywords.search(sql):
+        return False, "Only SELECT queries are allowed for security reasons."
     return True, ""
 
-def extract_tables_from_sql(sql: str) -> list[str]:
+def run_direct_sql(connection_string: str, sql_query: str):
     """
-    Very simple heuristic to extract table names after FROM / JOIN.
+    Connects to the database and runs a provided SQL query directly.
+    Returns (DataFrame, error_message).
     """
-    candidates = []
-    # get tokens following FROM or JOIN up to whitespace or punctuation
-    for kw in [" from ", "\nfrom ", " join ", "\njoin "]:
-        parts = re.split(kw, sql, flags=re.IGNORECASE)
-        if len(parts) > 1:
-            for p in parts[1:]:
-                token = re.split(r"[\s\(\),;]+", p.strip())[0]
-                if token and token.upper() not in {"SELECT"}:
-                    candidates.append(token)
-    # Deduplicate preserving order
-    seen = set()
-    ordered = []
-    for t in candidates:
-        if t not in seen:
-            seen.add(t)
-            ordered.append(t)
-    return ordered
-
-def safe_run_sql(conn: sqlite3.Connection, sql: str) -> tuple[pd.DataFrame | None, str | None]:
     try:
-        df = pd.read_sql(sql, conn)
+        with sqlitecloud.connect(connection_string) as conn:
+            df = pd.read_sql_query(sql_query, conn)
         return df, None
     except Exception as e:
         return None, str(e)
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-def user_panel(use_cloud: bool = True):
-    st.title("📊 SQL Query Assistant")
 
-    # Session state
+# ===================================================================
+# THE MAIN user_panel() FUNCTION
+# ===================================================================
+def user_panel():
+    # -------------------------------------------------------------------
+    # CACHE THE BACKEND
+    # -------------------------------------------------------------------
+    @st.cache_resource
+    def load_backend():
+        st.info("Initializing RAG/KG Backend... This may take a moment on first run or after an admin update.")
+        schema_info = extract_schema(db_path)
+        embedding_docs = generate_embedding_text(schema_info)
+        embedded_docs = generate_embeddings_hf(embedding_docs)
+        vectorstore = build_faiss_vectorstore(embedded_docs)
+        G = build_schema_kg(schema_info)
+        app = create_graph_app()
+        st.success("Backend initialized successfully!")
+        return app, vectorstore, G
+
+    app, vectorstore, kg = load_backend()
+    
+    # -------------------------------------------------------------------
+    # MANAGE SESSION STATE
+    # -------------------------------------------------------------------
     if "history" not in st.session_state:
         st.session_state.history = []
-    if "show_history" not in st.session_state:
-        st.session_state.show_history = False
+    if "view_mode" not in st.session_state:
+        st.session_state.view_mode = "Latest Result"
 
-    # Sidebar
-    show_history = st.sidebar.toggle(
-        "Query History",
-        # value=st.session_state.show_history,
-        value=st.session_state.get("show_history", False),
-        key="show_history",
-        help="Toggle to view previous queries & results",
-    )
-    temperature = st.sidebar.slider("Model temperature", 0.0, 1.0, 0.0, 0.1)
-    # model_name = st.sidebar.selectbox("Model", ["gpt-4o-mini", "gpt-4o", "gpt-4o-mini-transcribe"], index=0)
-    model_name = "gpt-4o-mini"
+    # -------------------------------------------------------------------
+    # DEFINE THE USER INTERFACE WITH TABS
+    # -------------------------------------------------------------------
+    st.sidebar.header("Query Options")
+    visualize_toggle = st.sidebar.checkbox("Generate Visualization", value=True, help="Create a plot (only for Natural Language queries).")
     
-    if use_cloud:
-        conn = sqlitecloud.connect(DATABASE_CONNECTION_STRING)
-    else:
-        conn = sqlite3.connect("uploaded_db.sqlite")
+    st.sidebar.divider()
+    st.sidebar.header("Display Mode")
+    st.session_state.view_mode = st.sidebar.radio(
+        "Choose what to display:",
+        ["Latest Result", "Full History"],
+        label_visibility="collapsed"
+    )
 
-    # History view
-    if show_history:
-        st.subheader("🕒 Query History")
-        if st.session_state.history:
-            for i, rec in enumerate(reversed(st.session_state.history), 1):
-                with st.expander(f"Query {i}: {rec['nl']}"):
-                    st.markdown("**SQL**")
-                    st.code(rec["sql"], language="sql")
-                    if isinstance(rec["result"], pd.DataFrame):
-                        st.markdown("**Result**")
-                        st.dataframe(rec["result"], use_container_width=True, height=300)
-                    else:
-                        st.markdown("**Result**")
-                        st.write(rec["result"])
-        else:
-            st.info("No queries run yet.")
-        if conn:
-            conn.close()
-        return
+    # --- NEW: Create two tabs for the two different functionalities ---
+    tab1, tab2 = st.tabs(["**Ask with Natural Language**", "**Run SQL Directly**"])
 
-    # Main panel
-    st.subheader("Ask the question")
-    nl_request = st.text_area("", placeholder="e.g., Calculate total number of treated patients by region whose age > 18")
+    # --- TAB 1: Natural Language Query (Your existing workflow) ---
+    with tab1:
+        with st.form("nl_query_form"):
+            user_query = st.text_area("Enter your question in natural language:", height=150, placeholder="e.g., Calculate total number of treated patients by region whose age > 18")
+            submit_nl_button = st.form_submit_button("🚀 Process Natural Language Query")
+            
+            if submit_nl_button and user_query:
+                st.session_state.view_mode = "Latest Result"
+                with st.spinner("Analyzing query, running through RAG & KG, executing, and self-correcting..."):
+                    try:
+                        init_state = { "nl_query": user_query, "vectorstore": vectorstore, "kg": kg, "visualize": visualize_toggle, "semantic_context": "", "rels": [], "canonical_tables": [], "sql_query": "", "df": None, "validation_hints": "", "is_valid": False, "retries": 0, "error_retries": 0, "visualization_path": None }
+                        final_state = app.invoke(init_state)
+                        # Add a 'type' to the history for easier display later
+                        st.session_state.history.append({"query": user_query, "result": final_state, "type": "langgraph"})
+                    except Exception as e:
+                        st.error(f"An unexpected error occurred: {e}")
+                        st.session_state.history.append({"query": user_query, "error": str(e), "type": "langgraph"})
+    
+    # --- TAB 2: Direct SQL Execution (The new feature) ---
+    with tab2:
+        with st.form("sql_query_form"):
+            manual_sql_query = st.text_area("Enter your SQLite query:", height=200, placeholder='SELECT "Region", COUNT(*)\nFROM "Patients"\nGROUP BY "Region";')
+            submit_sql_button = st.form_submit_button("▶️ Run Manual SQL")
 
-    # Build schema (if DB available)
-    schema_text = "No schema available (database not found)."
-    schema_summary = ""
-    if conn:
-        schema_text, schema_map = load_schema(conn)
-        schema_summary = summarize_schema(schema_map)
-        with st.expander("📚 Database schema"):
-            st.text(schema_text)
-
-    # Generate SQL
-    if st.button("🧠 Generate SQL"):
-        if not nl_request.strip():
-            st.warning("Please enter a request first.")
-        elif not conn:
-            st.error("No database file found. Please create/upload tables in the Admin panel first.")
-        else:
-            gen_prompt = build_generation_prompt(nl_request, schema_text, schema_summary)
-            sql = call_llm_sql(gen_prompt, temperature=temperature, model=model_name)
-
-            ok, msg = enforce_select_only(sql)
-            if not ok:
-                st.error(f"Guardrail: {msg}")
-            else:
-                st.markdown("**Proposed SQL**")
-                st.session_state["proposed_sql"] = sql
-                st.code(sql, language="sql")
-
-                tables_ref = extract_tables_from_sql(sql)
-                if tables_ref:
-                    st.caption("Tables referenced: " + ", ".join(tables_ref))
-
-    # Allow editing/confirmation of the proposed SQL
-    if "proposed_sql" in st.session_state:
-        st.markdown("### Review & Run")
-        edited_sql = st.text_area("Edit Query (optional)", value=st.session_state["proposed_sql"], height=160, key="editable_sql")
-
-        col_run, col_clear = st.columns([3, 1])
-        with col_run:
-            if st.button("▶️ Run SQL"):
-                if not conn:
-                    st.error("No database found.")
+            if submit_sql_button and manual_sql_query:
+                st.session_state.view_mode = "Latest Result"
+                is_safe, message = enforce_select_only(manual_sql_query)
+                if not is_safe:
+                    st.error(f"Security Alert: {message}")
                 else:
-                    ok, msg = enforce_select_only(edited_sql or "")
-                    if not ok:
-                        st.error(f"Guardrail: {msg}")
-                    else:
-                        df, err = safe_run_sql(conn, edited_sql)
-                        if err:
-                            st.error(f"Execution error: {err}")
-                            # Try a single self-correction round
-                            st.info("Attempting to auto-correct the query…")
-                            fix_prompt = build_correction_prompt(edited_sql, err, schema_text, nl_request, schema_summary)
-                            fixed_sql = call_llm_sql(fix_prompt, temperature=0.0, model=model_name)
-
-                            ok2, msg2 = enforce_select_only(fixed_sql)
-                            if not ok2:
-                                st.error(f"Correction failed guardrail: {msg2}")
-                            else:
-                                st.markdown("**Corrected SQL**")
-                                st.code(fixed_sql, language="sql")
-                                df2, err2 = safe_run_sql(conn, fixed_sql)
-                                if err2:
-                                    st.error(f"Correction failed: {err2}")
-                                else:
-                                    st.success("Corrected query executed successfully.")
-                                    st.dataframe(df2, use_container_width=True)
-                                    # Save history
-                                    st.session_state.history.append({
-                                        "nl": nl_request,
-                                        "sql": fixed_sql,
-                                        "result": df2
-                                    })
-                                    # Offer download
-                                    csv = df2.to_csv(index=False).encode("utf-8")
-                                    st.download_button("Download CSV", csv, "query_results.csv", "text/csv")
-                                    # Update proposed sql
-                                    st.session_state["proposed_sql"] = fixed_sql
+                    with st.spinner("Executing your SQL query..."):
+                        df, error = run_direct_sql(db_path, manual_sql_query)
+                        if error:
+                            st.error(f"Execution Failed: {error}")
+                            st.session_state.history.append({"query": "Manual SQL Execution", "sql": manual_sql_query, "error": error, "type": "manual"})
                         else:
-                            st.success("Query executed successfully.")
-                            st.dataframe(df, use_container_width=True)
-                            # Save history
-                            st.session_state.history.append({
-                                "nl": nl_request,
-                                "sql": edited_sql,
-                                "result": df
-                            })
-                            # Offer download
-                            csv = df.to_csv(index=False).encode("utf-8")
-                            st.download_button("Download CSV", csv, "query_results.csv", "text/csv")
+                            st.success("Manual query executed successfully!")
+                            st.session_state.history.append({"query": "Manual SQL Execution", "sql": manual_sql_query, "df": df, "type": "manual"})
 
-        with col_clear:
-            if st.button("🧹 Clear Proposed SQL"):
-                st.session_state.pop("proposed_sql", None)
-                st.rerun()
+    # -------------------------------------------------------------------
+    # --- UPDATED: CONDITIONAL DISPLAY LOGIC TO HANDLE BOTH RESULT TYPES ---
+    # -------------------------------------------------------------------
+    st.divider()
 
-    if conn:
-        conn.close()
+    # --- VIEW 1: Show the most recent result ---
+    if st.session_state.view_mode == "Latest Result":
+        if st.session_state.history:
+            latest_entry = st.session_state.history[-1]
+            st.subheader(f"Latest Result for: \"{latest_entry['query']}\"")
+            
+            if "error" in latest_entry:
+                st.error(f"Failed to process query: {latest_entry['error']}")
+            # Display logic for LangGraph results
+            elif latest_entry.get("type") == "langgraph":
+                final_state = latest_entry["result"]
+                st.code(final_state.get("sql_query"), language="sql")
+                st.dataframe(final_state.get("df"))
+                if final_state.get("visualization_path"):
+                    st.image(final_state.get("visualization_path"))
+            # Display logic for Manual SQL results
+            elif latest_entry.get("type") == "manual":
+                st.code(latest_entry.get("sql"), language="sql")
+                st.dataframe(latest_entry.get("df"))
+        else:
+            st.info("Submit a query to see the results here.")
+
+    # --- VIEW 2: Show the entire history in detail ---
+    elif st.session_state.view_mode == "Full History":
+        st.subheader("📜 Full Query History")
+        if not st.session_state.history:
+            st.info("No queries have been run in this session yet.")
+        else:
+            for i, entry in enumerate(reversed(st.session_state.history)):
+                with st.expander(f"Query {len(st.session_state.history) - i}: {entry['query']}", expanded=(i==0)):
+                    if "error" in entry:
+                        st.error(f"Failed to process query: {entry['error']}")
+                    # Display for LangGraph history
+                    elif entry.get("type") == "langgraph":
+                        final_state = entry["result"]
+                        st.markdown("##### Final SQL Query"); st.code(final_state.get("sql_query"), language="sql")
+                        st.markdown("##### Query Result Data"); st.dataframe(final_state.get("df"))
+                        if final_state.get("visualization_path"):
+                            st.markdown("##### Data Visualization"); st.image(final_state.get("visualization_path"))
+                    # Display for Manual SQL history
+                    elif entry.get("type") == "manual":
+                        st.markdown("##### Manual SQL Query"); st.code(entry.get("sql"), language="sql")
+                        st.markdown("##### Query Result Data"); st.dataframe(entry.get("df"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# import streamlit as st
+# import pandas as pd
+# from graph_logic import create_graph_app
+# from dotenv import load_dotenv
+# import os
+
+# # Your imports from your custom modules
+# from step_1 import extract_schema, generate_embedding_text
+# from sql_txt_2 import (
+#     generate_embeddings_hf,
+#     build_faiss_vectorstore,
+#     build_schema_kg,
+# )
+# # Note: The functions from sql_text_3 and sql_text_4 are now inside your graph_logic.py nodes
+# # so they are no longer needed here.
+
+# # -------- Load env --------
+# load_dotenv()
+# db_path = os.getenv("DATABASE_CONNECTION_STRING")
+
+# # ===================================================================
+# # THE ENTIRE PAGE LOGIC IS WRAPPED IN THIS user_panel() FUNCTION
+# # ===================================================================
+# def user_panel():
+#     # -------------------------------------------------------------------
+#     # CACHE THE BACKEND
+#     # -------------------------------------------------------------------
+#     @st.cache_resource
+#     def load_backend():
+#         """
+#         Initializes all backend components: Vectorstore, KG, and the compiled
+#         LangGraph app.
+#         """
+#         st.info("Initializing RAG/KG Backend... This may take a moment on first run or after an admin update.")
+        
+#         # This logic for building the RAG/KG system is now part of the cached setup.
+#         # It will only run when the app starts or when the cache is cleared.
+#         schema_info = extract_schema(db_path)
+#         embedding_docs = generate_embedding_text(schema_info)
+#         embedded_docs = generate_embeddings_hf(embedding_docs)
+#         vectorstore = build_faiss_vectorstore(embedded_docs)
+#         G = build_schema_kg(schema_info)
+        
+#         app = create_graph_app()
+        
+#         st.success("Backend initialized successfully!")
+#         return app, vectorstore, G
+
+#     app, vectorstore, kg = load_backend()
+    
+#     # -------------------------------------------------------------------
+#     # MANAGE SESSION STATE
+#     # -------------------------------------------------------------------
+#     if "history" not in st.session_state:
+#         st.session_state.history = []
+    
+#     # --- NEW: Add a session state for the view mode ---
+#     if "view_mode" not in st.session_state:
+#         st.session_state.view_mode = "Latest Result"
+
+#     # -------------------------------------------------------------------
+#     # DEFINE THE USER INTERFACE
+#     # -------------------------------------------------------------------
+#     st.sidebar.header("Query Options")
+#     visualize_toggle = st.sidebar.checkbox("Generate Visualization", value=True, help="Create a plot of the query results.")
+    
+#     # --- NEW: Add a toggle to switch between views ---
+#     st.sidebar.divider()
+#     st.sidebar.header("Display Mode")
+#     st.session_state.view_mode = st.sidebar.radio(
+#         "Choose what to display in the main panel:",
+#         ["Latest Result", "Full History"],
+#         label_visibility="collapsed" # Hides the "Choose what..." label
+#     )
+
+#     with st.form("query_form"):
+#         user_query = st.text_area("Enter your question in natural language:", height=150, placeholder="e.g., Calculate total number of treated patients by region whose age > 18")
+#         submit_button = st.form_submit_button("🚀 Process Query")
+    
+#     # -------------------------------------------------------------------
+#     # GRAPH INVOCATION LOGIC
+#     # -------------------------------------------------------------------
+#     if submit_button and user_query:
+#         # When a new query is submitted, always switch the view to show the latest result
+#         st.session_state.view_mode = "Latest Result"
+        
+#         with st.spinner("Analyzing query, running through RAG & KG, executing, and self-correcting..."):
+#             try:
+#                 init_state = {
+#                     "nl_query": user_query,
+#                     "vectorstore": vectorstore,
+#                     "kg": kg,
+#                     "visualize": visualize_toggle,
+#                     "semantic_context": "", "rels": [], "canonical_tables": [],
+#                     "sql_query": "", "df": None, "validation_hints": "",
+#                     "is_valid": False, "retries": 0, "error_retries": 0,
+#                     "visualization_path": None,
+#                 }
+#                 final_state = app.invoke(init_state)
+#                 st.session_state.history.append({"query": user_query, "result": final_state})
+#             except Exception as e:
+#                 st.error(f"An unexpected error occurred: {e}")
+#                 st.session_state.history.append({"query": user_query, "error": str(e)})
+
+#     # -------------------------------------------------------------------
+#     # --- NEW: CONDITIONAL DISPLAY LOGIC BASED ON VIEW MODE ---
+#     # -------------------------------------------------------------------
+#     st.divider()
+
+#     # --- VIEW 1: Show only the most recent result ---
+#     if st.session_state.view_mode == "Latest Result":
+#         if st.session_state.history:
+#             latest_entry = st.session_state.history[-1]
+#             st.subheader(f"Latest Result for: \"{latest_entry['query']}\"")
+            
+#             if "error" in latest_entry:
+#                 st.error(f"Failed to process query: {latest_entry['error']}")
+#             else:
+#                 # Unpack and display the full result
+#                 final_state = latest_entry["result"]
+#                 sql_query = final_state.get("sql_query")
+#                 df = final_state.get("df")
+#                 viz_path = final_state.get("visualization_path")
+
+#                 with st.expander("Final SQL Query", expanded=False):
+#                     st.code(sql_query, language="sql")
+                
+#                 st.subheader("Query Result Data")
+#                 if df is not None and not df.empty:
+#                     st.dataframe(df)
+#                     csv = df.to_csv(index=False).encode("utf-8")
+#                     st.download_button("📥 Download Results as CSV", csv, "query_results.csv", "text/csv")
+#                 else:
+#                     st.warning("The query executed successfully but returned no data.")
+
+#                 if viz_path:
+#                     st.subheader("📊 Data Visualization")
+#                     st.image(viz_path, caption="A plot generated from the query results.")
+#         else:
+#             st.info("Submit a query to see the results here.")
+
+#     # --- VIEW 2: Show the entire history in detail ---
+#     elif st.session_state.view_mode == "Full History":
+#         st.subheader("📜 Full Query History")
+#         if not st.session_state.history:
+#             st.info("No queries have been run in this session yet.")
+#         else:
+#             # Iterate through history in reverse (most recent first)
+#             for i, entry in enumerate(reversed(st.session_state.history)):
+#                 with st.expander(f"Query #{len(st.session_state.history) - i}: {entry['query']}", expanded=(i==0)):
+#                     if "error" in entry:
+#                         st.error(f"Failed to process query: {entry['error']}")
+#                     else:
+#                         # Unpack and display the full result for this specific history item
+#                         final_state = entry["result"]
+#                         sql_query = final_state.get("sql_query")
+#                         df = final_state.get("df")
+#                         viz_path = final_state.get("visualization_path")
+
+#                         st.markdown("##### Generated SQL Query")
+#                         st.code(sql_query, language="sql")
+                        
+#                         st.markdown("##### Query Result Data")
+#                         if df is not None and not df.empty:
+#                             st.dataframe(df)
+#                             csv = df.to_csv(index=False).encode("utf-8")
+#                             # Use a unique key for each download button
+#                             st.download_button("📥 Download as CSV", csv, f"query_{i}_results.csv", "text/csv", key=f"download_csv_{i}")
+#                         else:
+#                             st.warning("Query returned no data.")
+
+#                         if viz_path:
+#                             st.markdown("##### Data Visualization")
+#                             st.image(viz_path)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# import streamlit as st
+# import pandas as pd
+# from graph_logic import create_graph_app
+# from dotenv import load_dotenv
+# import os
+# from step_1 import extract_schema, generate_embedding_text
+# from sql_txt_2 import (
+#     generate_embeddings_hf,
+#     build_faiss_vectorstore,
+#     build_schema_kg,
+# )
+# from sql_text_3 import (
+#     llm_complete,
+#     run_sql_query,
+# )
+# from sql_text_4 import (
+#     get_table_names_from_kg,
+#     validate_sql_with_kg,
+# )
+
+# # -------- Load env --------
+# load_dotenv()
+# db_path = os.getenv("DATABASE_CONNECTION_STRING")
+
+# st.set_page_config(page_title="Query Assistant", layout="wide")
+# st.title("🤖 RAG + KG Powered Query Assistant")
+
+# # ===================================================================
+# # THE ENTIRE PAGE LOGIC IS NOW WRAPPED IN THIS user_panel() FUNCTION
+# # ===================================================================
+# def user_panel():
+#     # -------------------------------------------------------------------
+#     # STEP 1: CACHE THE BACKEND (MOST IMPORTANT STEP)
+#     # This function initializes all heavy components and is cached. It will only
+#     # run once when the app starts, or when the cache is cleared from the Admin Page.
+#     # -------------------------------------------------------------------
+#     @st.cache_resource
+#     def load_backend():
+#         """
+#         Initializes all backend components: Vectorstore, KG, and the compiled
+#         LangGraph app.
+#         """
+#         st.info("Initializing backend... This may take a moment on first run.")
+#         # Extract schema
+#         schema_info = extract_schema(db_path)
+#         # Embeddings
+#         embedding_docs = generate_embedding_text(schema_info)
+#         embedded_docs = generate_embeddings_hf(embedding_docs)
+#         # Vectorstore (FAISS or Chroma)
+#         vectorstore = build_faiss_vectorstore(embedded_docs)
+#         # Build Knowledge Graph
+#         G = build_schema_kg(schema_info)
+#         # Compile the LangGraph application
+#         app = create_graph_app()
+
+#         st.success("Backend initialized successfully!")
+#         return app, vectorstore, G
+
+#     # Load the cached backend components. Streamlit will not re-run load_backend()
+#     # on subsequent interactions unless the cache is cleared.
+#     app, vectorstore, kg = load_backend()
+
+#     # -------------------------------------------------------------------
+#     # STEP 2: MANAGE SESSION STATE FOR HISTORY
+#     # We will now store the entire final state of the graph for richer history.
+#     # -------------------------------------------------------------------
+#     if "history" not in st.session_state:
+#         st.session_state.history = []
+
+#     # -------------------------------------------------------------------
+#     # STEP 3: DEFINE THE USER INTERFACE
+#     # The UI is simplified. We have one main action button.
+#     # -------------------------------------------------------------------
+#     st.sidebar.header("Query Options")
+#     visualize_toggle = st.sidebar.checkbox("Generate Visualization", value=True, help="If checked, the system will attempt to create a plot of the query results.")
+
+#     with st.form("query_form"):
+#         user_query = st.text_area("Enter your question in natural language:", height=150, placeholder="e.g., Calculate total number of treated patients by region whose age > 18")
+#         submit_button = st.form_submit_button("🚀 Process Query")
+
+#     # -------------------------------------------------------------------
+#     # STEP 4: REPLACE THE ENTIRE OLD LOGIC WITH A SINGLE GRAPH INVOCATION
+#     # -------------------------------------------------------------------
+#     if submit_button and user_query:
+#         with st.spinner("Analyzing query, running through RAG & KG, executing, and self-correcting..."):
+#             try:
+#                 # Prepare the initial state dictionary to be passed to the graph
+#                 init_state = {
+#                     "nl_query": user_query,
+#                     "vectorstore": vectorstore,
+#                     "kg": kg,
+#                     "visualize": visualize_toggle,
+#                     # All other keys must be initialized to their default empty values
+#                     "semantic_context": "", 
+#                     "rels": [], 
+#                     "canonical_tables": [],
+#                     "sql_query": "", 
+#                     "df": None, 
+#                     "validation_hints": "",
+#                     "is_valid": False, 
+#                     "retries": 0, 
+#                     "error_retries": 0,
+#                     "visualization_path": None,
+#                 }
+
+#                 # Invoke the LangGraph application. This one line replaces all your
+#                 # previous logic for prompt building, LLM calls, and error correction.
+#                 final_state = app.invoke(init_state)
+
+#                 # Store the complete result in the session state history
+#                 st.session_state.history.append({"query": user_query, "result": final_state})
+
+#             except Exception as e:
+#                 # Catch any hard failures from the graph (e.g., max retries exceeded)
+#                 st.error(f"An unexpected error occurred: {e}")
+#                 st.session_state.history.append({"query": user_query, "error": str(e)})
+
+#     # -------------------------------------------------------------------
+#     # STEP 5: DISPLAY THE FINAL RESULT FROM THE LATEST HISTORY ENTRY
+#     # This section is now much simpler. It just unpacks and displays the
+#     # final state without needing any further logic.
+#     # -------------------------------------------------------------------
+#     if st.session_state.history:
+#         latest_entry = st.session_state.history[-1]
+
+#         st.divider()
+#         st.subheader(f"Results for: \"{latest_entry['query']}\"")
+
+#         if "error" in latest_entry:
+#             st.error(f"Failed to process query: {latest_entry['error']}")
+#         else:
+#             final_state = latest_entry["result"]
+#             sql_query = final_state.get("sql_query")
+#             df = final_state.get("df")
+#             viz_path = final_state.get("visualization_path")
+
+#             # Display the final SQL query
+#             with st.expander("Final SQL Query", expanded=False):
+#                 st.code(sql_query, language="sql")
+
+#             # Display the result DataFrame
+#             st.subheader("Query Result Data")
+#             if df is not None and not df.empty:
+#                 st.dataframe(df)
+#                 # Offer download button
+#                 csv = df.to_csv(index=False).encode("utf-8")
+#                 st.download_button("📥 Download Results as CSV", csv, "query_results.csv", "text/csv")
+#             else:
+#                 st.warning("The query executed successfully but returned no data.")
+
+#             # Display the visualization if it was created
+#             if viz_path:
+#                 st.subheader("📊 Data Visualization")
+#                 st.image(viz_path, caption="A plot generated from the query results.")
+
+#     # -------------------------------------------------------------------
+#     # STEP 6: DISPLAY HISTORY IN THE SIDEBAR
+#     # -------------------------------------------------------------------
+#     with st.sidebar.expander("📜 Query History", expanded=True):
+#         if not st.session_state.history:
+#             st.write("No queries yet.")
+#         for i, item in enumerate(reversed(st.session_state.history)):
+#             st.info(f"**{len(st.session_state.history) - i}. {item['query']}**")

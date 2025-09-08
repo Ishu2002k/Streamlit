@@ -1,7 +1,8 @@
+# -------------------- Admin.py --------------------------
 import pandas as pd
 import streamlit as st
 import os
-import sqlitecloud  # Use sqlitecloud instead of sqlite3
+import sqlitecloud 
 import io
 import csv
 from dotenv import load_dotenv
@@ -44,11 +45,9 @@ def update_password(email, new_password):
         c.execute("UPDATE users SET password=? WHERE email=?", (new_password, email))
         conn.commit()
 
-
 # ------------------------
 # Email Helper (Use Gmail/SMTP)
 # ------------------------
-
 def send_otp(email, otp):
     sender = os.getenv("SMTP_EMAIL")       # Gmail address
     password = os.getenv("SMTP_PASSWORD")  # Gmail App Password
@@ -223,6 +222,11 @@ def admin_panel():
         if not uploaded_files:
             st.info("No files selected.")
         else:
+            # ----- Change 1: Start -----
+            # We track if an actual upload happens to trigger the cache clearing.
+            upload_was_performed = False
+            # ----- Change 1: End -------
+
             # Build list of new files to process (read bytes once)
             new_files = []
             for f in uploaded_files:
@@ -235,6 +239,10 @@ def admin_panel():
             if not new_files:
                 st.info("No new files to upload.")
             else:
+                # --- CHANGE 1: START ---
+                upload_was_performed = True
+                # --- CHANGE 1: END ---
+
                 # PROCESS each new file (your existing processing code)
                 for name, file_bytes, fingerprint in new_files:
                     st.info(f"Processing file: {name}")
@@ -368,6 +376,15 @@ def admin_panel():
 
                     # mark fingerprint as processed so subsequent reruns skip it
                     st.session_state.processed_files_fingerprints.add(fingerprint)
+
+            # --- CHANGE 1: START ---
+            # After all files are processed, if any upload occurred, clear the cache.
+            if upload_was_performed:
+                st.cache_resource.clear()
+                st.success("All new files have been uploaded.")
+                st.info("The RAG/KG system cache has been cleared. It will be rebuilt on the next user query.")
+            # --- CHANGE 1: END ---
+
     # -------------------------
     # Fetch Tables Function
     # -------------------------
@@ -413,15 +430,18 @@ def admin_panel():
                     conn.execute(f'DROP TABLE IF EXISTS "{table_name}";')
                     conn.commit()
                 st.success(f"Table `{table_name}` has been deleted!")
+                # --- CHANGE 2: START ---
+                # The table has been deleted, so we MUST clear the cache.
+                st.cache_resource.clear()
+                st.info("The RAG/KG system cache has been cleared. It will be rebuilt on the next user query.")
+                # --- CHANGE 2: END ---
                 st.rerun()
  
             if col2.button("❌ Cancel", key="cancel_delete"):
                 st.info("Delete action cancelled.")
                 st.rerun()
  
- 
         # Trigger dialog on button click
         with col2:
             if st.button("❌ Delete Table"):
                 confirm_delete_dialog(selected_table)
-

@@ -1,25 +1,16 @@
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+from typing import TypedDict, List, Optional
+from openai import AzureOpenAI
 from langgraph.graph import StateGraph, START, END
-from typing import TypedDict, Any
+import sqlitecloud
 from sqlglot import parse_one
 from dotenv import load_dotenv
-import os
-import matplotlib.pyplot as plt
-import pandas as pd
-
-from step_1 import extract_schema, generate_embedding_text
-
-from sql_txt_2 import (
-    generate_embeddings_hf,
-    build_faiss_vectorstore,
-    build_chroma_vectorstore,
-    build_schema_kg,
-)
-
 from sql_text_3 import (
     llm_complete,
     run_sql_query,
 )
-
 from sql_text_4 import (
     get_table_names_from_kg,
     validate_sql_with_kg,
@@ -29,24 +20,53 @@ from sql_text_4 import (
 load_dotenv()
 db_path = os.getenv("DATABASE_CONNECTION_STRING")
 
-# ---------- Define State ----------
-class PipelineState(TypedDict):
-    nl_query: str
-    vectorstore: Any
-    kg: Any
-    visualize: bool
-    semantic_context: str
-    rels: list[str]
-    canonical_tables: list[str]
-    sql_query: str
-    df: Any
-    validation_hints: str
-    is_valid: bool
-    retries: int
-    visualization_path: str
+# ---------- Azure OpenAI Client ----------
+client = AzureOpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    api_version=os.getenv("OPENAI_API_VERSION"),
+)
 
-# ------------------------- Nodes ------------------
+LLM_MODEL = os.getenv("LLM_MODEL")
+
+# =================================================================
+# 1. DEFINE THE STATE FOR THE GRAPH
+# This TypedDict defines the "memory" of your agent. All nodes
+# will read from and write to this shared state.
+# =================================================================
+class PipelineState(TypedDict):
+    # Inputs
+    nl_query: str                   # The user's natural language question
+    vectorstore: any                # Your RAG vectorstore object
+    kg: any                         # Your Knowledge Graph object
+    visualize: bool                 # Toggle for generating a plot
+
+    # State variables that are populated by nodes
+    semantic_context: str           # Context retrieved from the vectorstore
+    rels: List[str]                 # Relationships from the Knowledge Graph
+    canonical_tables: List[str]     # Table names identified for the query
+    sql_query: str                  # The generated SQL query
+    df: Optional[pd.DataFrame]      # The DataFrame result of the SQL execution
+    
+    # Control flow and error handling
+    validation_hints: Optional[str] # Error messages from SQL execution or validation
+    is_valid: bool                  # Flag from the validator node
+    retries: int                    # Counter for the validation loop
+    error_retries: int              # New Counter for the execution/correction loop
+    
+    # Final output
+    visualization_path: Optional[str] # Path to the saved visualization image
+
+# =================================================================
+# 3. DEFINE THE NODES OF THE GRAPH
+# Each node is a Python function that takes the state and returns
+# a modified version of the state.
+# =================================================================
+# --------------------Retriever Nodes ------------------
 def retriever_node(state: PipelineState):
+    """
+    Node 1: Retrieves relevant context using RAG.
+    """
     retriever = state["vectorstore"].as_retriever(search_kwargs = {"k":15})
     retrieved_docs = retriever.invoke(state["nl_query"])
     semantic_context = "\n".join([doc.page_content for doc in retrieved_docs])
@@ -54,6 +74,9 @@ def retriever_node(state: PipelineState):
     return state
 
 def kg_node(state: PipelineState):
+    """
+    Node 2: Enhances context using the Knowledge Graph.
+    """
     table_map = get_table_names_from_kg(state["kg"])
     canonical_tables = list(table_map.values())
     rels = []
@@ -67,6 +90,9 @@ def kg_node(state: PipelineState):
     return state
 
 def llm_sql_node(state: PipelineState):
+    """
+    Node 3: Generates the SQL query using the LLM.
+    """
     system_prompt = (
         f"You are an expert SQL generator for SQLite.\n"
         "Do not use any alias in SQL Query\n"
@@ -100,6 +126,9 @@ def llm_sql_node(state: PipelineState):
     return state
 
 def validator_node(state: PipelineState):
+    """
+    Node 4: Validates the generated SQL for syntax or basic errors.
+    """
     sql_query = state["sql_query"]
     try:
         parse_one(sql_query,dialect = "sqlite")
@@ -113,8 +142,11 @@ def validator_node(state: PipelineState):
     state["is_valid"] = is_valid
     state["validation_hints"] = hints
     return state
-    
+
 def executor_node(state: PipelineState):
+    """
+    Node 5: Executes the SQL query against the database.
+    """
     query = state["sql_query"]
     try:
         df = run_sql_query(query)
@@ -130,6 +162,9 @@ def executor_node(state: PipelineState):
     return state
 
 def error_handler_node(state: PipelineState):
+    """
+    Node 6: Attempts to correct a failed SQL query.
+    """
     system_prompt = (
         f"You are an expert SQL generator for SQLite.\n"
         "Do not use any alias in SQL Query\n"
@@ -268,114 +303,77 @@ def visualizer_node(state: PipelineState):
     
     return state
 
-# --------------------- Build Graph ----------------------
-def build_langgraph(vectorstore,kg,nl_query,max_retries = 2,visualize = True,visualize_data = True):
+# =================================================================
+# 4. DEFINE THE GRAPH AND ITS EDGES
+# This function assembles the nodes into a coherent workflow.
+# =================================================================
+def create_graph_app():
+    """
+    Creates and compiles the LangGraph application.
+    This is the function that will be cached by Streamlit.
+    """
+    MAX_VALIDATION_RETRIES = 2
+    MAX_ERROR_RETRIES = 2
+
     graph = StateGraph(PipelineState)
 
-    # Add Nodes
-    graph.add_node("retriever",retriever_node)
-    graph.add_node("kg",kg_node)
-    graph.add_node("llm_sql",llm_sql_node)
-    graph.add_node("validator",validator_node)
-    graph.add_node("executor",executor_node)
-    graph.add_node("error_handler",error_handler_node)
-    graph.add_node("visualizer",visualizer_node)
+    # Add all the nodes to the graph
+    graph.add_node("retriever", retriever_node)
+    graph.add_node("kg", kg_node)
+    graph.add_node("llm_sql", llm_sql_node)
+    graph.add_node("validator", validator_node)
+    graph.add_node("executor", executor_node)
+    graph.add_node("error_handler", error_handler_node)
+    graph.add_node("visualizer", visualizer_node)
 
-    # Entry Point (important!)
-    graph.add_edge(START,"retriever")
+    # Define the starting point of the graph
+    graph.add_edge(START, "retriever")
 
-    # Flow
-    graph.add_edge("retriever","kg")
-    graph.add_edge("kg","llm_sql")
-    graph.add_edge("llm_sql","validator")
+    # Define the linear flow of the graph
+    graph.add_edge("retriever", "kg")
+    graph.add_edge("kg", "llm_sql")
+    graph.add_edge("llm_sql", "validator")
 
-    # Conditional branch after validation
+    # --- Define Conditional Edges (Routers) ---
     def validation_router(state: PipelineState):
-        if(state["is_valid"]):
+        if state["is_valid"]:
             return "executor"
-        elif state["retries"] + 1 < max_retries:
-            state["retries"] += 1
-            return "llm_sql"
         else:
-            raise ValueError(
-                f"Unable to produce valid SQL after {max_retries} attempts. "
+            if state["retries"] + 1 < MAX_VALIDATION_RETRIES:
+                state["retries"] += 1
+                return "llm_sql" # Go back to regenerate SQL
+            else:
+                raise ValueError(
+                f"Unable to produce valid SQL after {MAX_VALIDATION_RETRIES} attempts. "
                 f"Hints: {state['validation_hints']}"
             )
     
-    # This router decides if the executor was successful or not
     def executor_router(state: PipelineState):
-        if state.get("validation_hints"):
-            # If there was an execution error, go to the error handler
+        if state.get("validation_hints"): # An error occurred during execution
+            if state.get("error_retries", 0) >= MAX_ERROR_RETRIES:
+                raise ValueError("Failed to correct SQL query after multiple attempts.")
             return "error_handler"
-        elif state.get("visualize"):
-            # If execution was successful AND visualization is requested, go to visualizer
+        elif state.get("visualize"): # Execution was successful, and user wants a plot
             return "visualizer"
-        else:
-            # If execution was successful and no visualization is needed, end
-            return "result"
+        else: # Execution successful, no visualization needed
+            return END
     
-    graph.add_conditional_edges("executor",executor_router,{"error_handler":"error_handler","visualizer":"visualizer","result":END})
-    graph.add_conditional_edges("validator",validation_router,{"executor":"executor","llm_sql":"llm_sql"})
-    
-    # Exit Point (important !)
-    graph.add_edge("error_handler","executor")
-    graph.add_edge("visualizer",END)
-    # graph.add_edge("error_handler",END)
-    # graph.add_edge("executor",END)
+    graph.add_conditional_edges(
+        "validator",
+        validation_router,
+        {"executor": "executor", "llm_sql": "llm_sql"}
+    )
+      
+    graph.add_conditional_edges(
+        "executor",
+        executor_router,
+        {"error_handler": "error_handler", "visualizer": "visualizer", END: END}
+    )
 
-    # Compile
+    # Define final edges
+    graph.add_edge("error_handler", "executor") # After fixing, retry execution
+    graph.add_edge("visualizer", END)           # After visualizing, end
+
+    # Compile the graph into a runnable application
     app = graph.compile()
-
-    # Visualization
-    if visualize:
-        print(app.get_graph().draw_ascii())
-    
-    # Initial State
-    init_state = {
-        "nl_query": nl_query,
-        "vectorstore": vectorstore,
-        "kg": kg,
-        "semantic_context":"",
-        "rels":[],
-        "canonical_tables": [],
-        "sql_query": "",
-        "df": None,
-        "validation_hints": "",
-        "is_valid": False,
-        "retries": 0, 
-        "visualize": visualize_data,
-        "visualization_path": None,
-    }
-
-    final_state = app.invoke(init_state)
-    return final_state["sql_query"],final_state["df"],final_state.get("visualization_path")
-
-# -------------------------- Example Main -------------------
-if __name__ == "__main__":
-    # Extract schema
-    schema_info = extract_schema(db_path)
-
-    # Embeddings
-    embedding_docs = generate_embedding_text(schema_info)
-    embedded_docs = generate_embeddings_hf(embedding_docs)
-
-    # Vectorstore (FAISS or Chroma)
-    vectorstore = build_faiss_vectorstore(embedded_docs)
-    # vectorstore = build_chroma_vectorstore(embedded_docs)  # persistent option
-
-    # Build Knowledge Graph
-    G = build_schema_kg(schema_info)
-
-    # Example NL query
-    # nl_query = "Find all the People with region they belong who have returned atleast one order"
-    # nl_query = "Orders where the amount is greater than mean + standard deviation for that Region."
-    # nl_query = "List People who never returned an order but belong to Regions where return rate > 30%."
-    nl_query = "Find the month with the highest return rate across all orders"
-    # nl_query = "For each Region, calculate the percentage contribution of each Person’s spending to the Region’s total."
-    # nl_query = "Find the Person_Name who has spent the maximum total Amount"
-    sql_df, df, viz_path = build_langgraph(vectorstore,G,nl_query)
-    print(f"\n✅ Final SQL Query:\n {sql_df}")
-    print(f"\n📊 Output:\n{df}")
-    print(f"Visualization Path: {viz_path}")
-    if(viz_path):
-        print(f"Visualization created at: {viz_path}")
+    return app
