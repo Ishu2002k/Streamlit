@@ -18,7 +18,9 @@ from fewshot_adapter import (
     build_fewshot_prompt,
     add_fewshot_example,
     save_turn,
-    get_conversation_context
+    get_conversation_context,
+    build_error_correction_prompt,
+    add_error_correction_example,
 )
 
 # ---------- Azure OpenAI Client ----------
@@ -168,71 +170,144 @@ def executor_node(state: PipelineState):
     """
     query = state["sql_query"]
     try:
+        # Execute the SQL query
         df = run_sql_query(query)
         state["df"] = df
-        # ✅ Save successful turn to few-shot memory
+        
+        # ✅ Query executed successfully
+        print(f"\n✅ SQL Execution Successful!")
+        print(f"Result shape: {df.shape if df is not None else 'No data'}")
+        
+        # Check if this was a correction (error_retries > 0)
+        if state.get("error_retries", 0) > 0:
+            # This was a successful error correction!
+            print("🎯 Successful error correction - storing pattern for learning")
+            
+            # Try to get the previous broken query from conversation memory
+            # This is a simplified approach - you might want to store broken queries explicitly
+            broken_query = state.get("previous_broken_query", "Unknown")
+            previous_error = state.get("previous_error", "Unknown error")
+            
+            # Store the successful correction pattern
+            add_error_correction_example(
+                state["nl_query"], 
+                broken_query, 
+                previous_error, 
+                state["sql_query"]
+            )
+        
+        # Add to few-shot learning (all successful queries)
         add_fewshot_example(state["nl_query"], state["sql_query"])
-
-        # ✅ Also log conversation turn with result (optional)
-        save_turn(state["nl_query"], state["sql_query"],success = True)
+        
+        # Update conversation memory with success
+        save_turn(state["nl_query"], state["sql_query"], success=True)
+        
+        # Clear validation hints
         state["validation_hints"] = None
         
     except Exception as e:
+        # ❌ Query execution failed
         error_msg = str(e)
+        print(f"\n❌ SQL Execution Failed: {error_msg}")
+        
+        # Store broken query for potential learning if fixed later
+        state["previous_broken_query"] = state["sql_query"]
+        state["previous_error"] = error_msg
+        
         state["df"] = None
-        state["validation_hints"] = str(e)
-
+        state["validation_hints"] = error_msg
+        
         # Update conversation memory with failure
-        save_turn(state["nl_query"], f"FAILED: {state['sql_query']} | Error: {error_msg}", success=False)
+        save_turn(state["nl_query"], f"FAILED: {error_msg}", success=False)
 
-
-    # print(f"\n✅ Final SQL Query:\n{state['sql_query']}")
-    # print(f"\n📊 Output:\n{state["df"]}")
     return state
 
 def error_handler_node(state: PipelineState):
     """
-    Node 6: Attempts to correct a failed SQL query.
+    Node 6: Advanced error correction using few-shot examples, conversation context, and error patterns.
     """
     # Increment error retry counter
     state["error_retries"] = state.get("error_retries",0) + 1
 
     system_prompt = (
-        f"You are an expert SQL generator for SQLite.\n"
-        # "Do not use any alias in SQL Query\n"
-        f"Use ONLY these exact table names (do NOT singularize or invent names): {state["canonical_tables"]}\n"
+        f"You are an expert SQL error correction specialist for SQLite.\n"
+        f"Use ONLY these exact table names (do NOT singularize or invent names): {state['canonical_tables']}\n"
         "Do NOT generate INSERT, UPDATE, DELETE, DROP, TRUNCATE.\n"
-        "Take care of values in the table irrespective user asked in capital or in lower case.\n"
-        "Return ONLY the final SELECT SQL (no explanation, no backticks).\n"
+        "Take care of values in the table irrespective of user input case (capital or lowercase).\n"
+        "Return ONLY the final corrected SELECT SQL (no explanation, no backticks, no markdown formatting).\n"
         "Use provided schema context and join hints. Ensure the SQL is valid SQLite.\n"
-        "You may include subqueries or CTEs using nested JSON objects.\n"
-        "Do not use unsupported math functions instead use basic aggregate functions.\n"
-        "Do not use nested aggregate functions\n"
+        "You may include subqueries or CTEs if needed.\n"
+        "Do not use unsupported math functions - use basic aggregate functions instead.\n"
+        "Do not use nested aggregate functions.\n"
+        "Focus on fixing the specific error while maintaining the original intent.\n"
+        "Learn from similar successful examples and error correction patterns.\n"
+        "Common SQLite issues to watch for:\n"
+        "- Column names with spaces need double quotes\n"
+        "- Table names with spaces need backticks or double quotes\n"
+        "- JOIN syntax must be explicit\n"
+        "- Aggregate functions cannot be nested\n"
+        "- LIMIT clause comes at the end\n"
     )
 
-    error_msg = state.get("validation_hints","") or state.get("execution_error")
+    error_msg = state.get("validation_hints","") or state.get("execution_error","")
     broken_query = state.get("sql_query","")
     nl_query = state.get("nl_query","")
     semantic_context = state.get("semantic_context", "")
+
+    # ---- Get conversation context -------
+    conv_context = get_conversation_context(max_turns=2)  # Shorter for error correction
+    
+    # ------- Get few-shot examples for similar queries ------
+    fewshot_prompt = build_fewshot_prompt(nl_query)
+    
+    # ------- Get specific error correction patterns ------
+    error_correction_prompt = build_error_correction_prompt(nl_query, error_msg)
+    
     user_prompt = f"""
+        Conversation Context:
+        {conv_context}
+
+        SUccessful Query Examples:
+        {fewshot_prompt}
+
+        Error Correction Patters:
+        {error_correction_prompt}
+
         Here is the available context and schema
         {semantic_context}
 
-        You generated this SQL query:
-        {broken_query}
+        Table Relationships:
+        {state.get("rels", [])}
 
-        It failed with error:
-        {error_msg}
-
-        Original user request:
-        {nl_query}
+        Failed Query Details:
+        User Request: {nl_query}
+        Generated SQL: {broken_query}
+        Error Message: {error_msg}
 
         Please carefully review the schema, the original request, the failed query, and the error.
         Then, rewrite the SQL query so it runs correctly on SQLite.
     """
-    fixed_query = llm_complete(system_prompt,user_prompt).strip()
-    state["sql_query"] = fixed_query
-    state["validation_hints"] = None
+    try:
+        # Generate corrected SQL
+        fixed_query = llm_complete(system_prompt, user_prompt.strip()).strip()
+        
+        print(f"\n🔧 ADVANCED ERROR CORRECTION - Attempt #{state['error_retries']}")
+        print(f"Query: {nl_query}")
+        print(f"Error: {error_msg}")
+        print(f"Broken: {broken_query}")
+        print(f"Fixed:  {fixed_query}")
+        
+        state["sql_query"] = fixed_query
+        state["validation_hints"] = None  # Clear previous error
+        
+        # Store this correction attempt for learning
+        correction_log = f"CORRECTION #{state['error_retries']} for '{nl_query}': {error_msg}"
+        save_turn(correction_log, f"Fixed: {fixed_query}", success=False)
+        
+    except Exception as e:
+        print(f"❌ Error in error_handler_node: {e}")
+        state["validation_hints"] = f"Error correction failed: {str(e)}. Original error: {error_msg}"
+    
     return state
 
 def visualizer_node(state: PipelineState):

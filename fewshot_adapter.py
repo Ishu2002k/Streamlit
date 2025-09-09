@@ -178,5 +178,86 @@ def initialize_with_base_examples():
     
     print(f"🚀 Initialized with {len(base_examples)} base examples")
 
-# Auto-initialize on import (comment out if not desired)
-# initialize_with_base_examples()
+# ---------------------------------------------------------------------------------------------------
+# Add these functions to your fewshot_adapter.py for error_handler_node function 
+# ---------------------------------------------------------------------------------------------------
+def add_error_correction_example(original_query: str, broken_sql: str, error_msg: str, fixed_sql: str):
+    """Store error correction patterns for future reference"""
+    try:
+        error_pattern = f"Query: {original_query}\nBroken SQL: {broken_sql}\nError: {error_msg}\nFixed SQL: {fixed_sql}"
+        doc = Document(
+            page_content=f"Error correction for: {original_query}",
+            metadata={
+                "query": original_query,
+                "broken_sql": broken_sql,
+                "error_msg": error_msg,
+                "fixed_sql": fixed_sql,
+                "type": "error_correction"
+            }
+        )
+        fewshot_store.add_documents([doc])
+        print(f"✅ Added error correction pattern: {error_msg[:30]}...")
+    except Exception as e:
+        print(f"❌ Error storing correction pattern: {e}")
+
+def get_error_correction_examples(error_msg: str, k: int = 2):
+    """Retrieve similar error correction patterns"""
+    try:
+        if fewshot_store.index.ntotal == 0:
+            return []
+        
+        # Search for similar error messages
+        docs = fewshot_store.similarity_search(f"Error correction: {error_msg}", k=k)
+        corrections = []
+        
+        for doc in docs:
+            if doc.metadata.get("type") == "error_correction":
+                corrections.append({
+                    "query": doc.metadata.get("query", ""),
+                    "broken_sql": doc.metadata.get("broken_sql", ""),
+                    "error_msg": doc.metadata.get("error_msg", ""),
+                    "fixed_sql": doc.metadata.get("fixed_sql", "")
+                })
+        
+        return corrections
+    except Exception as e:
+        print(f"❌ Error retrieving correction examples: {e}")
+        return []
+
+def build_error_correction_prompt(original_query: str, error_msg: str):
+    """Build specialized prompt for error correction with similar error patterns"""
+    error_examples = get_error_correction_examples(error_msg, k=2)
+    
+    if not error_examples:
+        return "No similar error correction patterns found.\n"
+    
+    try:
+        correction_lines = ["Here are similar error correction examples:\n"]
+        
+        for i, example in enumerate(error_examples, 1):
+            correction_lines.append(f"Example {i}:")
+            correction_lines.append(f"Query: {example['query']}")
+            correction_lines.append(f"Error: {example['error_msg']}")
+            correction_lines.append(f"Broken SQL: {example['broken_sql']}")
+            correction_lines.append(f"Fixed SQL: {example['fixed_sql']}\n")
+        
+        print(f"🔧 Using {len(error_examples)} error correction examples")
+        return "\n".join(correction_lines)
+        
+    except Exception as e:
+        print(f"❌ Error building correction prompt: {e}")
+        return "Error correction examples unavailable.\n"
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
