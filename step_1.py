@@ -4,7 +4,6 @@ import os
 import sqlitecloud 
 from dotenv import load_dotenv
 from datetime import datetime
-import random
 
 load_dotenv()
 db_path = os.getenv("DATABASE_CONNECTION_STRING")

@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 from typing import TypedDict, List, Optional
 from openai import AzureOpenAI
 from langgraph.graph import StateGraph, START, END
-import sqlitecloud
 from sqlglot import parse_one
 from dotenv import load_dotenv
 from sql_text_3 import (
@@ -15,10 +14,12 @@ from sql_text_4 import (
     get_table_names_from_kg,
     validate_sql_with_kg,
 )
-
-# -------- Load env --------
-load_dotenv()
-db_path = os.getenv("DATABASE_CONNECTION_STRING")
+from fewshot_adapter import (
+    build_fewshot_prompt,
+    add_fewshot_example,
+    save_turn,
+    get_conversation_context
+)
 
 # ---------- Azure OpenAI Client ----------
 client = AzureOpenAI(
@@ -28,6 +29,9 @@ client = AzureOpenAI(
 )
 
 LLM_MODEL = os.getenv("LLM_MODEL")
+# -------- Load env --------
+load_dotenv()
+db_path = os.getenv("DATABASE_CONNECTION_STRING")
 
 # =================================================================
 # 1. DEFINE THE STATE FOR THE GRAPH
@@ -95,7 +99,7 @@ def llm_sql_node(state: PipelineState):
     """
     system_prompt = (
         f"You are an expert SQL generator for SQLite.\n"
-        "Do not use any alias in SQL Query\n"
+        # "Do not use any alias in SQL Query\n"
         f"Use ONLY these exact table names (do NOT singularize or invent names): {state["canonical_tables"]}\n"
         "Do NOT generate INSERT, UPDATE, DELETE, DROP, TRUNCATE.\n"
         "Take care of values in the table irrespective user asked in capital or in lower case.\n"
@@ -106,7 +110,18 @@ def llm_sql_node(state: PipelineState):
         "Do not use nested aggregate functions\n"
     )
 
+    # ---- Conversation context -------
+    conv_context = get_conversation_context(max_turns = 3)
+
+    # ------- Few-shot dynamic prompt ------
+    fewshot_prompt = build_fewshot_prompt(state["nl_query"])
+
+    # ------- User prompt with schema + validation -------
     user_prompt = f"""
+        {conv_context}
+
+        {fewshot_prompt}
+
         NL query:
         {state["nl_query"]}
 
@@ -120,9 +135,13 @@ def llm_sql_node(state: PipelineState):
         {state.get('validation_hints','')}
     """
 
-    sql_query = llm_complete(system_prompt,user_prompt).strip()
+    sql_query = llm_complete(system_prompt,user_prompt.strip()).strip()
     print(f"\n[LLM Raw SQL Attempt #{state['retries'] + 1}] \n{sql_query}")
     state["sql_query"] = sql_query
+
+    # Save the attempt (will be marked as successful later if execution succeeds)
+    save_turn(state["nl_query"], sql_query, success=False)  # Mark as tentative
+    
     return state
 
 def validator_node(state: PipelineState):
@@ -151,11 +170,21 @@ def executor_node(state: PipelineState):
     try:
         df = run_sql_query(query)
         state["df"] = df
+        # ✅ Save successful turn to few-shot memory
+        add_fewshot_example(state["nl_query"], state["sql_query"])
+
+        # ✅ Also log conversation turn with result (optional)
+        save_turn(state["nl_query"], state["sql_query"],success = True)
         state["validation_hints"] = None
         
     except Exception as e:
+        error_msg = str(e)
         state["df"] = None
         state["validation_hints"] = str(e)
+
+        # Update conversation memory with failure
+        save_turn(state["nl_query"], f"FAILED: {state['sql_query']} | Error: {error_msg}", success=False)
+
 
     # print(f"\n✅ Final SQL Query:\n{state['sql_query']}")
     # print(f"\n📊 Output:\n{state["df"]}")
@@ -165,9 +194,12 @@ def error_handler_node(state: PipelineState):
     """
     Node 6: Attempts to correct a failed SQL query.
     """
+    # Increment error retry counter
+    state["error_retries"] = state.get("error_retries",0) + 1
+
     system_prompt = (
         f"You are an expert SQL generator for SQLite.\n"
-        "Do not use any alias in SQL Query\n"
+        # "Do not use any alias in SQL Query\n"
         f"Use ONLY these exact table names (do NOT singularize or invent names): {state["canonical_tables"]}\n"
         "Do NOT generate INSERT, UPDATE, DELETE, DROP, TRUNCATE.\n"
         "Take care of values in the table irrespective user asked in capital or in lower case.\n"
@@ -178,7 +210,7 @@ def error_handler_node(state: PipelineState):
         "Do not use nested aggregate functions\n"
     )
 
-    error_msg = state.get("validation_hints","")
+    error_msg = state.get("validation_hints","") or state.get("execution_error")
     broken_query = state.get("sql_query","")
     nl_query = state.get("nl_query","")
     semantic_context = state.get("semantic_context", "")
