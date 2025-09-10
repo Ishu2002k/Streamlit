@@ -22,23 +22,23 @@ index = faiss.IndexFlatL2(dimension)
 
 # Build empty FAISS store
 fewshot_store = FAISS(
-    embedding_model.embed_query, 
-    index, 
-    InMemoryDocstore({}), 
-    {}
+    embedding_function = embedding_model.embed_query, 
+    index = index, 
+    docstore = InMemoryDocstore({}), 
+    index_to_docstore_id = {}
 )
 
 # Global memory (can swap to VectorStoreRetrieverMemory later)
 conv_memory = ConversationBufferMemory(
     return_messages=True,
     memory_key = "chat_history",
-    max_token_limit = 2000
+    max_token_limit = 3000
 )
 
 # Example schema for prompt
 example_template = PromptTemplate(
     input_variables = ["query","sql"],
-    template = "User Query: {Query}\nSQL Query: {sql}"
+    template = "User Query: {query}\nSQL Query: {sql}"
 )
 
 def add_fewshot_example(query: str,sql: str):
@@ -46,7 +46,11 @@ def add_fewshot_example(query: str,sql: str):
     try:
         doc = Document(
             page_content = query,
-            metadata = {"query": query, "sql": sql}  # Fixed: store both query and sql
+            metadata = {"query": query, 
+                        "sql": sql,
+                        "type": "fewshot_example",
+                        "success": True,
+                    }  # Fixed: store both query and sql
         )
         fewshot_store.add_documents([doc])
         print(f"✅ Added few-shot example: {query[:50]}...")
@@ -63,7 +67,7 @@ def get_fewshot_examples(user_query:str,k: int = 2):
         examples = []
         
         for doc in docs:
-            if "query" in doc.metadata and "sql" in doc.metadata:
+            if doc.metadata.get("type") == "fewshot_example" and "query" in doc.metadata and "sql" in doc.metadata:
                 examples.append({
                     "query": doc.metadata["query"], 
                     "sql": doc.metadata["sql"]
@@ -114,7 +118,7 @@ def save_turn(user_input: str, sql: str, success: bool = True):
     except Exception as e:
         print(f"❌ Error saving conversation turn: {e}")
 
-def get_conversation_context(max_turns: int = 3):
+def get_conversation_context(max_turns: int = 5):
     """Retrieve recent conversation history for context injection"""
     try:
         history = conv_memory.load_memory_variables({})
@@ -247,17 +251,3 @@ def build_error_correction_prompt(original_query: str, error_msg: str):
     except Exception as e:
         print(f"❌ Error building correction prompt: {e}")
         return "Error correction examples unavailable.\n"
-    
-
-
-
-
-
-
-
-
-
-
-
-
-

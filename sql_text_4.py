@@ -1,7 +1,7 @@
 import re
 from typing import Tuple, Dict, List
-from step_1 import extract_schema, generate_embedding_text,fetch_table_name
-from sql_txt_2 import find_join_path,build_schema_kg,build_faiss_vectorstore,build_chroma_vectorstore,generate_embeddings_hf
+from step_1 import extract_schema, generate_embedding_text
+from sql_txt_2 import find_join_path,build_schema_kg,build_faiss_vectorstore,generate_embeddings_hf
 from sql_text_3 import llm_complete,run_sql_query
 from dotenv import load_dotenv
 import os
@@ -48,58 +48,6 @@ def canonical_table_name(kg, name_candidate: str):
     name_l = name_candidate.strip().strip('"').strip("'").lower()
     tables_map = get_table_names_from_kg(kg)
     return tables_map.get(name_l)  # None if not found
-
-# -----------------------
-# SQL parsing (basic) With SQLGLOT library
-# -----------------------
-def extract_sql_references(expr):
-    alias_to_table = {}
-    qualified_columns = []
-    select_unqualified = []
-
-    def walk(node):
-        if isinstance(node, exp.Table):
-            alias = node.alias_or_name
-            alias_to_table[alias.lower()] = node.name
-
-        elif isinstance(node, exp.Column):
-            if node.table:
-                qualified_columns.append((node.table, node.name))
-            else:
-                select_unqualified.append(node.name)
-
-        elif isinstance(node, exp.CTE):
-            walk(node.this)
-
-        elif isinstance(node, exp.Subquery):
-            walk(node.this)
-
-        elif isinstance(node, exp.Select):
-            for child in node.expressions:
-                walk(child)
-            for clause in ["from", "joins", "where", "group", "having", "order"]:
-                if clause in node.args:
-                    val = node.args[clause]
-                    if isinstance(val, list):
-                        for item in val:
-                            walk(item)
-                    else:
-                        walk(val)
-
-        elif isinstance(node, exp.Expression):
-            for child in node.args.values():
-                if isinstance(child, list):
-                    for item in child:
-                        walk(item)
-                elif isinstance(child, exp.Expression):
-                    walk(child)
-
-    walk(expr)
-    return {
-        "alias_to_table": alias_to_table,
-        "qualified_columns": qualified_columns,
-        "select_unqualified": select_unqualified
-    }
 
 # -----------------------
 # Validator using KG
@@ -246,18 +194,6 @@ def validate_sql_with_kg(sql_query: str, kg, max_suggest: int = 3) -> Tuple[bool
 
     return valid, hints if hints else ["✅ SQL query is valid"]
 
-# ----------------- JSON PARSER ----------------------
-def safe_json_parse(plan_json):
-    # Remove leading 'json' or markdown artifacts
-    cleaned = re.sub(r"^json\s*", "", plan_json.strip(), flags=re.IGNORECASE)
-
-    # Remove triple backticks if present
-    if "```" in cleaned:
-        cleaned = cleaned.split("```")[1].strip()
-
-    return json.loads(cleaned)
-
-
 # -----------------------
 # Integrate into answer_query
 # -----------------------
@@ -352,7 +288,6 @@ if __name__ == "__main__":
 
     # Vectorstore (FAISS or Chroma)
     vectorstore = build_faiss_vectorstore(embedded_docs)
-    # vectorstore = build_chroma_vectorstore(embedded_docs)  # persistent option
 
     # Build Knowledge Graph
     G = build_schema_kg(schema_info)

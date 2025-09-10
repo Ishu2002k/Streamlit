@@ -4,22 +4,16 @@ from sqlglot import parse_one
 from dotenv import load_dotenv
 import os
 import matplotlib.pyplot as plt
-import pandas as pd
-
 from step_1 import extract_schema, generate_embedding_text
-
 from sql_txt_2 import (
     generate_embeddings_hf,
     build_faiss_vectorstore,
-    build_chroma_vectorstore,
     build_schema_kg,
 )
-
 from sql_text_3 import (
     llm_complete,
     run_sql_query,
 )
-
 from sql_text_4 import (
     get_table_names_from_kg,
     validate_sql_with_kg,
@@ -54,6 +48,11 @@ def retriever_node(state: PipelineState):
     return state
 
 def kg_node(state: PipelineState):
+    """
+    Extract a list of canonical table names from the schema graph
+    Identify and format relationships between tables
+    Store both in the pipeline state for downstream use (e.g., query generation, validation, or visualization)
+    """
     table_map = get_table_names_from_kg(state["kg"])
     canonical_tables = list(table_map.values())
     rels = []
@@ -270,60 +269,130 @@ def visualizer_node(state: PipelineState):
 
 # --------------------- Build Graph ----------------------
 def build_langgraph(vectorstore,kg,nl_query,max_retries = 2,visualize = True,visualize_data = True):
+    # graph = StateGraph(PipelineState)
+
+    # # Add Nodes
+    # graph.add_node("retriever",retriever_node)
+    # graph.add_node("kg",kg_node)
+    # graph.add_node("llm_sql",llm_sql_node)
+    # graph.add_node("validator",validator_node)
+    # graph.add_node("executor",executor_node)
+    # graph.add_node("error_handler",error_handler_node)
+    # graph.add_node("visualizer",visualizer_node)
+
+    # # Entry Point (important!)
+    # graph.add_edge(START,"retriever")
+
+    # # Flow
+    # graph.add_edge("retriever","kg")
+    # graph.add_edge("kg","llm_sql")
+    # graph.add_edge("llm_sql","validator")
+
+    # # Conditional branch after validation
+    # def validation_router(state: PipelineState):
+    #     if(state["is_valid"]):
+    #         return "executor"
+    #     elif state["retries"] + 1 < max_retries:
+    #         state["retries"] += 1
+    #         return "llm_sql"
+    #     else:
+    #         raise ValueError(
+    #             f"Unable to produce valid SQL after {max_retries} attempts. "
+    #             f"Hints: {state['validation_hints']}"
+    #         )
+    
+    # # This router decides if the executor was successful or not
+    # def executor_router(state: PipelineState):
+    #     if state.get("validation_hints"):
+    #         # If there was an execution error, go to the error handler
+    #         return "error_handler"
+    #     elif state.get("visualize"):
+    #         # If execution was successful AND visualization is requested, go to visualizer
+    #         return "visualizer"
+    #     else:
+    #         # If execution was successful and no visualization is needed, end
+    #         return "result"
+    
+    # graph.add_conditional_edges("executor",executor_router,{"error_handler":"error_handler","visualizer":"visualizer","result":END})
+    # graph.add_conditional_edges("validator",validation_router,{"executor":"executor","llm_sql":"llm_sql"})
+    
+    # # Exit Point (important !)
+    # graph.add_edge("error_handler","executor")
+    # graph.add_edge("visualizer",END)
+    # # graph.add_edge("error_handler",END)
+    # # graph.add_edge("executor",END)
+
+    # # Compile
+    # app = graph.compile()
+    MAX_VALIDATION_RETRIES = 2
+    MAX_ERROR_RETRIES = 2
+
     graph = StateGraph(PipelineState)
 
-    # Add Nodes
-    graph.add_node("retriever",retriever_node)
-    graph.add_node("kg",kg_node)
-    graph.add_node("llm_sql",llm_sql_node)
-    graph.add_node("validator",validator_node)
-    graph.add_node("executor",executor_node)
-    graph.add_node("error_handler",error_handler_node)
-    graph.add_node("visualizer",visualizer_node)
+    # Add all the nodes to the graph
+    graph.add_node("retriever", retriever_node)
+    graph.add_node("kg", kg_node)
+    graph.add_node("llm_sql", llm_sql_node)
+    graph.add_node("validator", validator_node)
+    graph.add_node("executor", executor_node)
+    graph.add_node("error_handler", error_handler_node)
+    graph.add_node("visualizer", visualizer_node)
 
-    # Entry Point (important!)
-    graph.add_edge(START,"retriever")
+    # Define the starting point of the graph
+    graph.add_edge(START, "retriever")
 
-    # Flow
-    graph.add_edge("retriever","kg")
-    graph.add_edge("kg","llm_sql")
-    graph.add_edge("llm_sql","validator")
+    # Define the linear flow of the graph
+    graph.add_edge("retriever", "kg")
+    graph.add_edge("kg", "llm_sql")
+    graph.add_edge("llm_sql", "validator")
 
-    # Conditional branch after validation
+    # --- Define Conditional Edges (Routers) ---
     def validation_router(state: PipelineState):
-        if(state["is_valid"]):
+        if state["is_valid"]:
+            # reset retries so error handling loop starts fresh
+            state["retries"] = 0
             return "executor"
-        elif state["retries"] + 1 < max_retries:
-            state["retries"] += 1
-            return "llm_sql"
         else:
-            raise ValueError(
-                f"Unable to produce valid SQL after {max_retries} attempts. "
+            if state["retries"] + 1 < MAX_VALIDATION_RETRIES:
+                state["retries"] += 1
+                return "llm_sql" # Go back to regenerate SQL
+            else:
+                raise ValueError(
+                f"Unable to produce valid SQL after {MAX_VALIDATION_RETRIES} attempts. "
                 f"Hints: {state['validation_hints']}"
             )
     
-    # This router decides if the executor was successful or not
     def executor_router(state: PipelineState):
-        if state.get("validation_hints"):
-            # If there was an execution error, go to the error handler
-            return "error_handler"
+        if state.get("validation_hints"): # An error occurred during execution
+            retries = state.get("error_retries",0)
+            if retries + 1 <= MAX_ERROR_RETRIES:
+                state["error_retries"] = retries + 1
+                return "error_handler"
+            else:
+                print("[Executor] Max error retries hit. Ending.")
+                return END
         elif state.get("visualize"):
-            # If execution was successful AND visualization is requested, go to visualizer
             return "visualizer"
         else:
-            # If execution was successful and no visualization is needed, end
-            return "result"
+            return END
     
-    graph.add_conditional_edges("executor",executor_router,{"error_handler":"error_handler","visualizer":"visualizer","result":END})
-    graph.add_conditional_edges("validator",validation_router,{"executor":"executor","llm_sql":"llm_sql"})
-    
-    # Exit Point (important !)
-    graph.add_edge("error_handler","executor")
-    graph.add_edge("visualizer",END)
-    # graph.add_edge("error_handler",END)
-    # graph.add_edge("executor",END)
+    graph.add_conditional_edges(
+        "validator",
+        validation_router,
+        {"executor": "executor", "llm_sql": "llm_sql",END:END},
+    )
+      
+    graph.add_conditional_edges(
+        "executor",
+        executor_router,
+        {"error_handler": "error_handler", "visualizer": "visualizer", END: END}
+    )
 
-    # Compile
+    # Define final edges
+    graph.add_edge("error_handler", "executor") # After fixing, retry execution
+    graph.add_edge("visualizer", END)           # After visualizing, end
+
+    # Compile the graph into a runnable application
     app = graph.compile()
 
     # Visualization

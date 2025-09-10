@@ -1,18 +1,18 @@
-openai
-python-dotenv
-streamlit
-pandas
-matplotlib
-seaborn
-numpy
-sqlalchemy
-dotenv
-sqlitecloud
-sendgrid
-sqlglot
-sentence-transformers
-faiss-cpu
-plotly
-langgraph
-openai
-python-dotenv
+openai == 1.102.0
+python-dotenv == 1.1.1
+streamlit == 1.48.1
+pandas == 2.3.1
+matplotlib == 3.10.5
+seaborn == 0.13.2
+numpy == 2.3.2
+sqlalchemy == 2.0.43
+sqlitecloud == 0.0.84
+sendgrid == 6.12.4
+sqlglot == 27.12.0
+faiss-cpu == 1.12.0
+plotly == 6.3.0
+langgraph == 0.6.7
+networkx == 3.5
+langchain_community == 0.3.29
+langchain == 0.3.27
+sqlparse == 0.5.3

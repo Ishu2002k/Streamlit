@@ -21,6 +21,7 @@ from fewshot_adapter import (
     get_conversation_context,
     build_error_correction_prompt,
     add_error_correction_example,
+    get_fewshot_stats,
 )
 
 # ---------- Azure OpenAI Client ----------
@@ -82,6 +83,9 @@ def retriever_node(state: PipelineState):
 def kg_node(state: PipelineState):
     """
     Node 2: Enhances context using the Knowledge Graph.
+            Extract a list of canonical table names from the schema graph
+            Identify and format relationships between tables
+            Store both in the pipeline state for downstream use (e.g., query generation, validation, or visualization)
     """
     table_map = get_table_names_from_kg(state["kg"])
     canonical_tables = list(table_map.values())
@@ -113,7 +117,7 @@ def llm_sql_node(state: PipelineState):
     )
 
     # ---- Conversation context -------
-    conv_context = get_conversation_context(max_turns = 3)
+    conv_context = get_conversation_context(max_turns = 4)
 
     # ------- Few-shot dynamic prompt ------
     fewshot_prompt = build_fewshot_prompt(state["nl_query"])
@@ -201,7 +205,10 @@ def executor_node(state: PipelineState):
         
         # Update conversation memory with success
         save_turn(state["nl_query"], state["sql_query"], success=True)
-        
+        x = get_fewshot_stats()
+        print(f"x: {x["total_examples"]}")
+        print(f"y: {x["status"]}")
+
         # Clear validation hints
         state["validation_hints"] = None
         
@@ -255,7 +262,7 @@ def error_handler_node(state: PipelineState):
     semantic_context = state.get("semantic_context", "")
 
     # ---- Get conversation context -------
-    conv_context = get_conversation_context(max_turns=2)  # Shorter for error correction
+    conv_context = get_conversation_context(max_turns = 4)  # Shorter for error correction
     
     # ------- Get few-shot examples for similar queries ------
     fewshot_prompt = build_fewshot_prompt(nl_query)
@@ -443,32 +450,37 @@ def create_graph_app():
 
     # --- Define Conditional Edges (Routers) ---
     def validation_router(state: PipelineState):
+        retries = state.get("retries",0)
         if state["is_valid"]:
+            # reset retries so error handling loop starts fresh
+            state["retries"] = 0
             return "executor"
         else:
-            if state["retries"] + 1 < MAX_VALIDATION_RETRIES:
-                state["retries"] += 1
+            if retries + 1 < MAX_VALIDATION_RETRIES:
+                state["retries"] = retries + 1
                 return "llm_sql" # Go back to regenerate SQL
             else:
-                raise ValueError(
-                f"Unable to produce valid SQL after {MAX_VALIDATION_RETRIES} attempts. "
-                f"Hints: {state['validation_hints']}"
-            )
+                print("[Validator] Max validation retries hit. Ending.")
+                return END
     
     def executor_router(state: PipelineState):
         if state.get("validation_hints"): # An error occurred during execution
-            if state.get("error_retries", 0) >= MAX_ERROR_RETRIES:
-                raise ValueError("Failed to correct SQL query after multiple attempts.")
-            return "error_handler"
-        elif state.get("visualize"): # Execution was successful, and user wants a plot
+            retries = state.get("error_retries",0)
+            if retries + 1 <= MAX_ERROR_RETRIES:
+                state["error_retries"] = retries + 1
+                return "error_handler"
+            else:
+                print("[Executor] Max error retries hit. Ending.")
+                return END
+        elif state.get("visualize"):
             return "visualizer"
-        else: # Execution successful, no visualization needed
+        else:
             return END
     
     graph.add_conditional_edges(
         "validator",
         validation_router,
-        {"executor": "executor", "llm_sql": "llm_sql"}
+        {"executor": "executor", "llm_sql": "llm_sql",END:END},
     )
       
     graph.add_conditional_edges(
@@ -484,3 +496,9 @@ def create_graph_app():
     # Compile the graph into a runnable application
     app = graph.compile()
     return app
+
+# Find the person name whose Id is P003
+# Find the region from which he belongs to
+# Find all the person who belongs to same region from which he is
+# Find the orders returned by him
+# Find all the orders returned by the people who belong to his region

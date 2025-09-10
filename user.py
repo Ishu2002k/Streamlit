@@ -14,9 +14,6 @@ from sql_txt_2 import (
     build_schema_kg,
 )
 
-# --- NEW: Import your database connector directly for the manual query ---
-import sqlitecloud
-
 # -------- Load env --------
 load_dotenv()
 db_path = os.getenv("DATABASE_CONNECTION_STRING")

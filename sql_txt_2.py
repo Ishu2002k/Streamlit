@@ -2,7 +2,6 @@ import os
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
-from openai import AzureOpenAI
 import networkx as nx
 from networkx.exception import NetworkXNoPath, NodeNotFound
 from langchain_community.vectorstores import FAISS, Chroma
@@ -15,19 +14,11 @@ load_dotenv()
 db_path = os.getenv("DATABASE_CONNECTION_STRING")
 
 # --------------- Embedding Model (BGE) ----------------
-EMB_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME")
 LLM_MODEL = os.getenv("LLM_MODEL")
-
-# ---------------- LLM Caller (Azure Compatible) ------------
-client = AzureOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    api_version=os.getenv("OPENAI_API_VERSION"),
-)
 
 # ---------- Initialize HuggingFace Embeddings -------------
 embedding_model = HuggingFaceEmbeddings(
-    model_name=os.getenv("MODEL_NAME", "BAAI/bge-base-en-v1.5")
+    model_name=os.getenv("EMBEDDING_MODEL_NAME")
 )
 
 # ------------- Generate Embedding from docs ----------------
@@ -57,8 +48,7 @@ def build_chroma_vectorstore(docs,persist_dir = "./chroma_db"):
                             docs,
                             embedding_model,
                             persist_directory = persist_dir
-                            )
-
+                        )
     return vectorstore
 
 # ---------- Knowledge Graph (tables/columns/edges) ----------

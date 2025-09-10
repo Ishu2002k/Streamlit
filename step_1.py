@@ -26,15 +26,15 @@ def guess_column_type(values):
         return "TEXT"
     
     # Check Boolean
-    if all(str(v).lower() in ["true", "false", "0", "1"] for v in values[:20]):
+    if all(str(v).lower() in ["true", "false", "0", "1"] for v in values[:30]):
         return "BOOLEAN"
 
     # Check integer
-    if all(re.match(r"^-?\d+$", str(v)) for v in values[:20]):
+    if all(re.match(r"^-?\d+$", str(v)) for v in values[:30]):
         return "INTEGER"
 
     # Check float
-    if all(re.match(r"^-?\d+(\.\d+)?$", str(v)) for v in values[:20]):
+    if all(re.match(r"^-?\d+(\.\d+)?$", str(v)) for v in values[:30]):
         return "FLOAT"
 
     # Check date formats
@@ -42,12 +42,12 @@ def guess_column_type(values):
         r"^\d{4}-\d{2}-\d{2}$",  # 2023-09-04
         r"^\d{2}/\d{2}/\d{4}$",  # 09/04/2023
     ]
-    if all(any(re.match(p, str(v)) for p in date_patterns) for v in values[:20]):
+    if all(any(re.match(p, str(v)) for p in date_patterns) for v in values[:30]):
         return "DATE"
 
     # Check datetime
     try:
-        for v in values[:20]:
+        for v in values[:30]:
             datetime.fromisoformat(str(v))
         return "DATETIME"
     except Exception:
@@ -86,22 +86,38 @@ def extract_schema(db_path,sample_limit = 200,example_limit = 3):
 
         # 2. Get column details
         cursor.execute(f"PRAGMA table_info({quote_identifier(table)});")
+        # Five values: (Index, Column Name, Data Type, Not Null, Default Value, Primary Key)
         columns = cursor.fetchall()
 
         for col in columns:
-            col_name, declared_type = col[1], col[2]
+            col_name, declared_type,pk_flag = col[1], col[2],col[5]
 
             # --- NEW: sample values to refine datatype ---
             cursor.execute(f"SELECT {quote_identifier(col_name)} FROM {quote_identifier(table)} LIMIT 30;")
             sample_values = [row[0] for row in cursor.fetchall()]
             inferred_type = guess_column_type(sample_values)
-
             # prefer inferred type if it is more meaningful
             col_type = inferred_type if inferred_type != "TEXT" else declared_type
 
+            # Check for uniqueness if not already a primary key
+            is_candidate_pk = False
+            if pk_flag == 0:
+                try:
+                    cursor.execute(f"""
+                        SELECT COUNT(*) = COUNT(DISTINCT {quote_identifier(col_name)})
+                        FROM {quote_identifier(table)}
+                        WHERE {quote_identifier(col_name)} IS NOT NULL;
+                    """)
+                    is_candidate_pk = (cursor.fetchone()[0] == 1)
+                except Exception:
+                    pass
+
             schema_info["tables"][table]["columns"].append(
-                {"name": col_name, "type": col_type}
-            )
+                {"name": col_name, 
+                 "type": col_type,
+                 "is_primary_key": pk_flag == 1,
+                 "is_candidate_pk": is_candidate_pk
+            })
 
         try:
             cursor.execute(f"select * from {quote_identifier(table)} LIMIT {example_limit};")
@@ -188,7 +204,6 @@ def extract_schema(db_path,sample_limit = 200,example_limit = 3):
     conn.close()
     return schema_info
 
-
 def generate_embedding_text(schema_info,sample_rows = 5):
     """
     Generate descriptive text from schema for embeddings.
@@ -197,8 +212,6 @@ def generate_embedding_text(schema_info,sample_rows = 5):
     Returns:
         list of dict: items with id, text
     """
-    conn = sqlitecloud.connect(db_path)
-    cursor = conn.cursor()
     embedding_docs = []
 
     # Table-level text
@@ -212,32 +225,12 @@ def generate_embedding_text(schema_info,sample_rows = 5):
             text = f"Column: {col['name']} in {table}. Type: {col['type']}."
             embedding_docs.append({"id": f"column::{table}.{col['name']}", "text": text})
 
-        # Example rows
-        # try:
-        #     cursor.execute(f"SELECT * FROM \"{table}\";")
-        #     rows = cursor.fetchall()
-        #     col_names = [c['name'] for c in details["columns"]]
-
-        #     # Randomly sample up to 5 rows
-        #     sampled_rows = random.sample(rows, min(len(rows), sample_rows))
-
-        #     for idx, row in enumerate(sampled_rows):
-        #         row_desc = ", ".join(f"{col_names[i]}={row[i]}" for i in range(len(row)))
-        #         text = f"Example Row from {table}: {row_desc}."
-        #         embedding_docs.append({
-        #             "id": f"row::{table}::{idx}",
-        #             "text": text
-        #         })
-        # except Exception as e:
-        #     print(f"Warning: Could not fetch sample rows for {table}: {e}")
-
     # Relationship-level text
     for rel in schema_info["relationships"]:
         text = f"Relationship: {rel['from_table']}.{rel['from_column']} -> {rel['to_table']}.{rel['to_column']} ({rel['type']})."
         embedding_docs.append({"id": f"rel::{rel['from_table']}.{rel['from_column']}->{rel['to_table']}.{rel['to_column']}", "text": text})
 
     return embedding_docs
-
 
 # Example usage
 if __name__ == "__main__":

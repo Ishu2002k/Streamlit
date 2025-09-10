@@ -1,5 +1,4 @@
 # Visualization with SQLite Cloud support
-
 import sqlite3
 import pandas as pd
 import streamlit as st
